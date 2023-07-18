@@ -1,0 +1,405 @@
+---
+title: "Sensitivity Analysis Experiments"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r}
+library(ivreg)
+library(ggplot2)
+library(plotly)
+library(akima)
+library(quadprog)
+library(lpSolve)
+library(sensemakr)
+#library(asbio)
+```
+
+# Exclusion Restriction
+
+```{r}
+c0 <- 0.25
+c1 <- 0.4
+c2 <- 0.4
+c3 <- 0.7
+c4 <- 0.25
+c5 <- 0.4
+c6 <- 0.4
+
+sigma_e1 <- sqrt(1-c3^2-c1^2-c5^2)
+sigma_e1
+
+#quad(a = 1, b = 2*c0*c3, c = (c0^2 + c2^2 + 2*c0*c1*c2 -1))
+
+
+sigma_e2 <- sqrt(1-(c0^2 + c2^2 + c4^2 + c6^2 + 2*c0*c2*c1 + 2*c0*c4*c3 + 2*c0*c6*c5))
+sigma_e2
+```
+
+```{r}
+bias_er_2sls_calc <- function(c0,c1,c2,c3,c4,c5){return(c4/c3)}
+bias_er_ols_calc  <- function(c0,c1,c2,c3,c4,c5){return(c1*c2/(1-c3^2-c5^2))}
+bias_er_noadj_calc <- function(c0,c1,c2,c3,c4,c5){return((c1*c2 + c3*c4)/(1-c5^2))}
+```
+
+```{r}
+# simulating data with 2 covariates
+simulate_er_violation_covariates <- function(c0,c1,c2,c3,c4,c5,c6,sigma_e1,sigma_e2){
+  result_2sls <- c()
+  result_ols <- c()
+  result_noadj <- c()
+  
+  c5_est <- c()
+  c6_est <- c()
+  c7_est <- c()
+
+  for (i in 1:500){
+    set.seed(i)
+    # data generating mechanism
+    z <- rnorm(500)
+    u <- rnorm(500)
+    w1 <- rnorm(500)
+    w2 <- rnorm(500)
+    e1 <- rnorm(500,0,sigma_e1)
+    e2 <- rnorm(500,0,sigma_e2)
+    
+    x <- c3*z + c1*u + c5*w1 + e1
+    y <- c4*z + c0*x + c2*u + c6*w1 + e2
+    
+  
+    
+    # orthogonalized variables and re-standardize
+    x_o <- residuals(lm(x ~ 0 + w1 + w2))
+    x_o_s <- (x_o-mean(x_o))/sd(x_o)
+    y_o <- residuals(lm(y ~ 0 + w1 + w2))
+    y_o_s <- (y_o-mean(y_o))/sd(y_o)
+    z_o <- residuals(lm(z ~ 0 + w1 + w2))
+    z_o_s <- (z_o-mean(z_o))/sd(z_o)
+    u_o <- residuals(lm(u ~ 0 + w1 + w2))
+    u_o_s <- (u_o-mean(u_o))/sd(u_o)
+    
+    data <- data.frame(cbind(x,y,z,u,x_o_s,y_o_s,z_o_s,u_o_s,w1,w2))
+    names(data) <- c("x","y","z","u","x_o_s","y_o_s","z_o_s","u_o_s","w1","w2")
+    
+    # 2sls
+    #tsls_model <- ivreg(y_o_s ~ 0 + x_o_s | z, data = data)
+    tsls_model <- ivreg(y ~ 0 + x + w1 | z + w1, data = data)
+    # ols adjust
+    ols_model <- lm(y ~ 0 + x + z + w1, data = data)
+    #ols_model <- lm(y_o_s ~ 0 + x_o_s + z_o_s, data = data)
+    # no adjustment
+    no_adj <- lm(y ~ 0 + x + w1, data = data)
+    #no_adj <- lm(y_o_s ~ 0 + x_o_s, data = data)
+    
+    result_2sls <- c(result_2sls,coef(tsls_model)[1])
+    result_ols <- c(result_ols,coef(ols_model)[1])
+    result_noadj <- c(result_noadj,coef(no_adj)[1])
+    
+    test_mod <- lm(x ~ w1 + z, data = data)
+    
+    c5_est <- c(c5_est, partial.R2(lm(x ~ z + w1, data = data),lm(x ~ z + w1 + u,data = data)))
+    c6_est <- c(c6_est, partial.R2(lm(y ~ x + z + w1, data = data),lm(y ~ x + z + w1 + u,data = data)))
+    c7_est <- c(c7_est, partial.R2(lm(x ~ 1, data = data),lm(x ~ z,data = data)))
+  }
+  
+  theo_2sls <- bias_er_2sls_calc(c0,c1,c2,c3,c4,c5)
+  theo_ols <- bias_er_ols_calc(c0,c1,c2,c3,c4,c5)
+  theo_noadj <- bias_er_noadj_calc(c0,c1,c2,c3,c4,c5)
+  
+  print(cov(c5_est,c6_est))
+  print(mean(c7_est))
+  
+  return_data <- data.frame(cbind(c4,c3,mean(result_noadj) - c0,mean(result_ols) - c0,mean(result_2sls) - c0,theo_noadj,theo_ols,theo_2sls))
+  #names(return_data) <- c("ER_Violation","IV_Strength","result_2sls","result_ols","result_noadj","cf_2sls","cf_ols","cf_noadj")
+
+  return(return_data)
+}
+```
+
+```{r}
+simulate_er_violation_covariates(c0,c1,c2,c3,c4,c5,c6,sigma_e1,sigma_e2)
+```
+
+# Unobserved confounder
+
+```{r}
+c0 <- 0.3
+c1 <- 0.4
+c2 <- 0.4
+c3 <- 0.5
+c4 <- 0.25
+c5 <- 0.4
+c6 <- 0.4
+c7 <- 0.25
+
+sigma_e3 <- sqrt(1-c4^2-c7^2)
+
+sigma_e1 <- sqrt(1-(c1^2 + c3^2 + c5^2 + 2*c1*c3*c4 + 2*c3*c5*c7))
+
+sigma_e2 <- sqrt(1-(c0^2 + (2*(c1+c3*c4)*c2*c0) + c2^2 + c6^2 + 2*c0*c6*(c5+c7*c3)))
+
+#sigma_e1
+#sigma_e2
+#sigma_e3
+```
+
+```{r}
+simulate_iv_unobserved_covariates <- function(c0,c1,c2,c3,c4,c5,c6,c7){
+  # NOTE: coverage of the theoretical result under misspecificiation, which should happen 95% of the time
+  
+  theo_2sls <- c2*c4/(c3 + c1*c4 - c3*c7^2)
+  result_2sls <- c()
+  
+  #theo_ols <- c1*c2*(1-c4^2)/(1-(c3+c1*c4)^2 - (c5+c3*c7)^2 + c3^2*c7^2 + c1^2*c4^2 - c1^2*c4^2/(1-c7^2))
+  #theo_ols <- (c1*c2 + (c1*c4^2*(c7^3 -1))/(1-c7^2))/(1-c5^2-c3^2-2*c3*c5*c7-2*c1*c3*c4-(c1^2*c4^2)/(1-c7^2))
+  theo_ols <- (c1*c2*(1-c4^2-c7^2)/(1-c7^2)) / (1 - (c5+c3*c7)^2 - (1-c7^2)*(c3+ c1*c4/(1-c7^2))^2)
+  result_ols <- c()
+  
+  theo_noadj <- (c1*c2 + c2*c3*c4)/(1-(c5+c3*c7)^2)
+  result_noadj <- c()
+  
+  z_coef <- c()
+  w_coef <- c()
+  
+  for (i in 1:500){
+    set.seed(i)
+    # data generating mechanism
+    u <- rnorm(500)
+    w <- rnorm(500)
+    
+    sigma_e3 <- rnorm(500,0,sqrt(1-c4^2-c7^2))
+    z <- c4*u + c7*w + sigma_e3
+    
+    
+    sigma_e1 <- rnorm(500,0,sqrt(1-(c1^2 + c3^2 + c5^2 + 2*c1*c3*c4 + 2*c3*c5*c7)))
+    x <- c3*z + c1*u + c5*w + sigma_e1
+    
+    sigma_e2 <- rnorm(500,0,sqrt(1-(c0^2 + (2*(c1+c3*c4)*c2*c0) + c2^2 + c6^2 + 2*c0*c6*(c5+c7*c3))))
+    y <- c0*x + c2*u + c6*w + sigma_e2
+    
+    z_o <- residuals(lm(z ~ 0 + w))/sd(residuals(lm(z ~ 0 + w)))
+
+    data <- data.frame(cbind(x,y,z,u,w,z_o,w))
+    names(data) <- c("x","y","z","u","w","z_o","w_test")
+    
+    
+    # 2sls
+    tsls_model <- ivreg(y ~ 0 + x + w| z + w, data = data)
+    # ols adjust
+    ols_model <- lm(y ~ 0 + x + z + w, data = data)
+    # no adjustment
+    no_adj <- lm(y ~ 0 + x + w, data = data)
+    
+    result_2sls <- c(result_2sls,coef(tsls_model)[1])
+    
+    result_ols <- c(result_ols,coef(ols_model)[1])
+    
+    result_noadj <- c(result_noadj,coef(no_adj)[1])
+    
+    #z_coef_mod <- lm(z ~ 0 + u , data = data)
+    #z_coef_mod <- residuals(lm(x ~ 0 + w + z , data = data))
+    partial_1 <- partial_r2(lm(x~z+w, data = data),"z")
+    var_1 <- var(residuals(lm(x ~ 0 + w , data = data)))
+    var_2 <- var(residuals(lm(z ~ 0 + w , data = data)))
+    w_coef <- c(w_coef,cov(data$x,data$w)^2)
+    #w_coef <- c(w_coef,coef(z_coef_mod)[1])
+    #z_coef <- c(z_coef,coef(z_coef_mod)[2])
+  }
+  print(mean(w_coef))
+  #print(mean(z_coef))
+  return_data <- data.frame(cbind(c4,c3,mean(result_noadj) - c0,mean(result_ols) - c0,mean(result_2sls) - c0,theo_noadj,theo_ols,theo_2sls))
+
+  return(return_data)
+}
+```
+
+```{r}
+simulate_iv_unobserved_covariates(c0,c1,c2,c3,c4,c5,c6,c7)
+```
+
+```{r}
+(c5+c3*c7)^2
+```
+
+```{r}
+num <- (c1*c2*(1-c4^2-c7^2)/(1-c7^2))
+denom <- (1 - (c5+c3*c7)^2 - (1-c7^2)*(c3+ c1*c4/(1-c7^2))^2)
+
+num/denom
+```
+
+# Treatment Effect Heterogeneity
+
+## Without XW
+
+```{r}
+a2 = 0.15
+b1 = 0.1
+b2 = 0.20
+b3 = 0.1
+b4 = 0.1
+
+a1 = 0.7
+a3 = 0.1
+
+a4 = 0.1
+a5 = 0.1
+
+
+sigma_e1_int = 1 - (a1^2 + a2^2 + a3^2 + a4^2 + a5^2)
+sigma_e2_int = 1 - (b1^2 + b2^2 + b3^2 + b4^2 + 2*b1*b2*a2 + 2*b1*b3*(a1*a3 + a1*a3) + 2*b1*a4*b4)
+
+sigma_e1_int
+sigma_e2_int
+```
+
+```{r}
+em_bias_noadj_calc <- function(a1,a2,a3,a4,b1,b2,b3,b4){return((b2*a2 + 2*b3*a1*a3)/(1-a4^2))}
+em_bias_ols_calc  <- function(a1,a2,a3,a4,b1,b2,b3,b4){return((a2*b2 + a1*a3*b3 + a4^2*b1)/(1-a1^2-a4^2))}
+em_bias_2sls_calc <- function(a1,a2,a3,b1,b2,b3){return(a3*b3 / a1)}
+```
+
+```{r}
+z_d_interaction_bias_tx_covariates <- function(a1,a2,a3,a4,a5,b1,b2,b3,b4,s_e1,s_e2){
+  unadj_result <- c()
+  adj_result <- c()
+  h_tsls_result <- c()
+  
+  z_coef <- c()
+  w_coef <- c()
+  
+  for (i in 1:500){
+    set.seed(i)
+    u1 <- rnorm(500)
+    z <- rnorm(500)
+    w <- rnorm(500)
+    e1 <- rnorm(500,0,sqrt(s_e1))
+    e2 <- rnorm(500,0,sqrt(s_e2))
+  
+    x <- a1*z + a2*u1 + a3*z*u1 + a4*w + a5*w*z + e1
+    y <- b1*x + b2*u1 + b3*x*u1 + b4*w + e2
+    
+    unadj_result <- c(unadj_result, coef(lm(y ~ 0 + x + w))[1])
+    adj_result <- c(adj_result,coef(lm(y ~ 0 + x + z + w))[1])
+    h_tsls_result <- c(h_tsls_result,coef(ivreg(y ~ 0 + x + w | z + w))[1])
+    
+    z_reg <- lm(x ~ 0 + w*z)# + z)
+    #z_coef <- c(z_coef,coef(z_reg)[2])
+    w_coef <- c(w_coef,coef(z_reg)[3])
+  }
+  
+  print(mean(z_coef))
+  print(mean(w_coef))
+  
+  cf_unadj <- em_bias_noadj_calc(a1,a2,a3,a4,b1,b2,b3,b4)
+  cf_zreg <- em_bias_ols_calc(a1,a2,a3,a4,b1,b2,b3,b4)
+  cf_tsls <- em_bias_2sls_calc(a1,a2,a3,b1,b2,b3)
+
+  return_data <- data.frame(cbind(a3,a1,mean(unadj_result) - b1, mean(adj_result) - b1, mean(h_tsls_result) - b1,cf_unadj,cf_zreg,cf_tsls))
+  names(return_data) <- c("ZU_Interaction","IV_Strength","unadj","zreg","tsls","cf_unadj","cf_zreg","cf_tsls")
+  return(return_data)
+}
+```
+
+```{r}
+z_d_interaction_bias_tx_covariates(a1,a2,a3,a4,a5,b1,b2,b3,b4,sigma_e1_int,sigma_e2_int)
+```
+
+## With XW
+
+```{r}
+b1 = 0.1
+b2 = 0.2
+b3 = 0.1
+b4 = 0.2
+b5 = 0.1
+
+a1 = 0.5
+a2 = 0.15
+a3 = 0.1
+a4 = 0.15
+a5 = 0.1
+
+
+sigma_e1_int = 1 - (a1^2 + a2^2 + a3^2 + a4^2 + a5^2)
+sigma_e2_int = 1 - (b1^2 + b2^2 + b3^2 + b4^2 + b5^2 + 2*b1*b2*a2 + 4*b1*b3*a1*a3 + 2*b1*a4*b4 + 4*b1*b5*a1*a5 + 2*b3*b5*(a2*a4+2*a3*a5))
+
+sigma_e1_int
+sigma_e2_int
+```
+
+```{r}
+em_bias_noadj_calc_2 <- function(a1,a2,a3,a4,a5,b1,b2,b3,b4,b5){return((b2*a2+2*b3*a1*a3/(1-a4^2-(4*a1^2*a5^2/(a4^2+2*a5^2+1)))))}
+
+#em_bias_noadj_calc_3 <- function(a1,a2,a3,a4,a5,b1,b2,b3,b4,b5){return((b2*a2+2*b3*a1*a3)/(1-a4^2-4*a1^2*a5^2))}
+
+em_bias_ols_calc_2  <- function(a1,a2,a3,a4,a5,b1,b2,b3,b4,b5){return((b2*a2+b3*a1*a3/(1-a1^2 - a4^2-(4*a1^2*a5^2/(a4^2+2*a5^2+1)))))}
+
+#em_bias_ols_calc_3 <- function(a1,a2,a3,a4,a5,b1,b2,b3,b4,b5){return((b2*a2+b3*a1*a3)/(1-a1^2-a4^2-(5*a1^2*a5^2)/(a4^2 + 2*a5^2 +1)^2))}
+
+em_bias_2sls_calc_2 <- function(a1,a2,a3,b1,b2,b3){return((a1*a3*b3 - 2*a1*a3*a5^2*b3/(a5^2 + a1^2))/(a5^2 + a1^2 - 4*a1^2*a5^2/(a5^2 + a1^2)))}
+
+#em_bias_2sls_calc_3 <- function(a1,a2,a3,b1,b2,b3){return((a3*b3)/ a1)}
+```
+
+```{r}
+z_d_interaction_bias_tx_covariates_part2 <- function(a1,a2,a3,a4,a5,b1,b2,b3,b4,b5,s_e1,s_e2,n_generate = 500){
+  unadj_result <- c()
+  adj_result <- c()
+  h_tsls_result <- c()
+  
+  adj_result_1 <- c()
+  h_tsls_result_1 <- c()
+  
+  result1 <- c()
+  result2 <- c()
+  result3 <- c()
+  
+  for (i in 1:500){
+    set.seed(i)
+    u1 <- rnorm(n_generate)
+    z <- rnorm(n_generate)
+    w <- rnorm(n_generate)
+    e1 <- rnorm(n_generate,0,sqrt(s_e1))
+    e2 <- rnorm(n_generate,0,sqrt(s_e2))
+  
+    x <- a1*z + a2*u1 + a3*z*u1 + a4*w + a5*w*z + e1
+    y <- b1*x + b2*u1 + b3*x*u1 + b4*w + b5*w*x + e2
+    
+    unadj_result <- c(unadj_result, coef(lm(y ~ 0 + x + w + I(x*w)))[1])
+    #unadj_result <- c(unadj_result, coef(lm(y ~ 0 + x + w))[1])
+    adj_result <- c(adj_result,coef(lm(y ~ 0 + x + z + w + I(x*w)))[1])
+    #adj_result <- c(adj_result,coef(lm(y ~ 0 + x + z + w))[1])
+    #h_tsls_result_1 <- c(h_tsls_result,coef(ivreg(y ~ 0 + x + w | 0 + z + w))[1]) 
+    h_tsls_result <- c(h_tsls_result,coef(ivreg(y ~ 0 + x + w + I(x*w) | 0 + z + w + I(w*z)))[1])
+    #h_tsls_result <- c(h_tsls_result,coef(ivreg(y ~ 0 + x + w | 0 + z + w))[1]) 
+    
+    #x_z_reg <- fitted(lm(x ~ 0 + z + w + I(w*z)))
+    #x_zw_reg <- fitted(lm(x*w ~ 0 + z + w + I(w*z)))
+    #final_reg <- lm(y ~ 0 + x_z_reg + w + x_zw_reg)
+    
+    #result1 <- c(result1,cov(residuals(lm(x~0+w+I(x*w))),residuals(lm(y~0+w+I(x*w))))/var(residuals(lm(x ~ 0 + w + I(x*w)))))
+    #result2 <- c(result2,cov(x-a4*w-2*a1*a5*x*w,y-(b1*a4+b4)*w+(b1*2*a1*a5 + b5*(a4^2 + 2*a5^2 +1))*x*w)/var(x-a4*w-2*a1*a5*x*w))
+    
+    #result2 <- c(result2,cov(w,x_zw_reg))
+    #result3 <- c(result3,coef(lm(y ~ 0 + z + w + I(z*w)))[1]/coef(lm(x ~ 0 + z + w + I(z*w)))[1])
+  }
+  
+  #print(mean(result1)-b1)
+  print(mean(result2))
+  print(mean(result3)-b1)
+  
+  cf_unadj <- em_bias_noadj_calc_2(a1,a2,a3,a4,a5,b1,b2,b3,b4,b5)
+  cf_zreg <- em_bias_ols_calc_2(a1,a2,a3,a4,a5,b1,b2,b3,b4,b5)
+  cf_tsls <- em_bias_2sls_calc_2(a1,a2,a3,b1,b2,b3)
+
+  return_data <- data.frame(cbind(a3,a1,mean(unadj_result) - b1, mean(adj_result) - b1, mean(h_tsls_result) - b1,cf_unadj,cf_zreg,cf_tsls))
+  names(return_data) <- c("ZU_Interaction","IV_Strength","unadj","zreg","tsls","cf_unadj","cf_zreg","cf_tsls")
+  return(return_data)
+}
+```
+
+```{r}
+z_d_interaction_bias_tx_covariates_part2(a1,a2,a3,a4,a5,b1,b2,b3,b4,b5,sigma_e1_int,sigma_e2_int,n_generate = 3000)
+```

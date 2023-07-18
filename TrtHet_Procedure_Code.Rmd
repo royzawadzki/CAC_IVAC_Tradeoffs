@@ -1,0 +1,330 @@
+---
+title: "Redone Treatment Effect Heterogeneity"
+output: html_notebook
+---
+
+```{r, echo = FALSE}
+library(MASS)
+library(HardyWeinberg)
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+library(hash)
+library(ppcor)
+library(sensemakr)
+library(latex2exp)
+```
+
+# Create Fake Data
+
+```{r, echo = FALSE}
+generate_data_trthet <- function(a1,a2,a3,a4,a5,b1,b2,b3,b4,b5,seed = 500,print = TRUE,n_generate = 1000){
+  set.seed(seed)
+  
+
+  
+  # data generating mechanism
+  u <- rnorm(n_generate)
+  z <- rnorm(n_generate)
+  
+  w1 <- rnorm(n_generate)
+  w2 <- rnorm(n_generate)
+  w3 <- rnorm(n_generate)
+  
+  w_pca <- prcomp(cbind(w1,w2,w3))
+  
+  w <- cbind(w1,w2,w3) %*% w_pca$rotation[,1]
+  w_pc2 <- cbind(w1,w2,w3) %*% w_pca$rotation[,2]
+  
+  sigma_e1_int = 1 - (a1^2 + a2^2 + a3^2 + a4^2 + a5^2)
+  sigma_e2_int = 1 - (b1^2 + b2^2 + b3^2 + b4^2 + b5^2 + 2*b1*b2*a2 + 4*b1*b3*a1*a3 + 2*b1*a4*b4 + 4*b1*b5*a1*a5 + 2*b3*b5*(a2*a4+2*a3*a5))
+  
+  e1 <- rnorm(n_generate,0,sqrt(sigma_e1_int))
+  e2 <- rnorm(n_generate,0,sqrt(sigma_e2_int))
+  
+  x <- a1*z + a2*u + a3*z*u + a4*w + a5*w*z + e1
+  y <- b1*x + b2*u + b3*x*u + b4*w + b5*w*x + e2
+  
+  # center zw and xu ?
+  
+  data <- data.frame(cbind(x,y,z,u,w,w1,w2,w3,w_pc2,z*u,z*w,x*u,x*w))
+  names(data) <- c("x","y","z","u","w","w1","w2","w3","w_pc2","zu","zw","xu","xw")
+  
+  if (print){
+    
+    if(sign(a1*a3*b3) == sign(b2*a2)){
+      print("case a")
+    }else{
+      if(abs(b2*a2)/abs(a3*b3) > abs(2*a1)){
+        print("case b")
+      }else{
+        print("case a")
+      }
+    }
+    print(sqrt(sigma_e1_int))
+    print(sqrt(sigma_e2_int))
+    
+    print(paste("No adjustment",(b2*a2+2*b3*a1*a3/(1-a4^2-(4*a1^2*a5^2/(a4^2+2*a5^2+1))))))
+    print(paste("2SLS",(a1*a3*b3 - 2*a1*a3*a5^2*b3/(a5^2 + a1^2))/(a5^2 + a1^2 - 4*a1^2*a5^2/(a5^2 + a1^2))))
+  }
+
+  return(data)
+}
+```
+
+# Estimate Quantities
+
+```{r}
+get_obs_lambda_trthet <- function(data,case){
+  
+  r2_x_zw <- summary(lm(x~0+zw,data = data_test))$r.squared
+  var_pred_xw <- var(fitted(lm(xw ~ z + zw,data = data_test)))
+
+  r2_x_xw <- summary(lm(x~0+xw,data = data_test))$r.squared
+  var_x_w_xw <- var(residuals(lm(x~0+w+xw,data = data_test)))
+  
+  r2_x_w <- cor(data$x,data$w)^2
+  r2_x_z <- cor(data$x,data$z)^2
+  
+  term_1 <- abs((0.5-(r2_x_zw/var_pred_xw))/(r2_x_w + r2_x_zw - r2_x_xw))*var_x_w_xw
+
+  # depending on the signs, we will return a different array of terms
+  if (case == "a"){
+    return_term <- (term_1 - 1)*2*r2_x_z 
+  }else if(case == "b"){
+    return_term <- (term_1 + 1)*2*r2_x_z 
+  }else if(case == "c"){
+    return_term <- (1 - term_1)*2*r2_x_z 
+  }
+  return(return_term)
+}
+```
+
+```{r}
+benchmark_gamma_trthet <- function(data,covariates,multiplier=1,benchmark){
+  # takes in data and multiplier
+  # returns the whole gamma function value
+  
+  ## unobserved confounding
+  if (benchmark){
+    r2_x_u_possible <- c()
+    r2_y_u_full_possible <- c()
+    for (covariate in covariates){
+      r2_x_u_possible <- c(r2_x_u_possible,cor(data$x,data[,covariate])^2)
+      r2_y_u_full_possible <- c(r2_y_u_full_possible,
+                                partial_r2(lm(y~x+w1+w2+w3+xw,data = data),covariate))
+      # reduced is the same as the full because we do not observe XU anyways
+    }
+    r2_x_u <- multiplier*max(r2_x_u_possible)
+    r2_y_u_full <- multiplier*max(r2_y_u_full_possible)
+    r2_y_u_red <- multiplier*max(r2_y_u_full_possible)
+  }else{
+    r2_x_u <- multiplier*cor(data$x,data$u)^2
+    r2_y_u_full <- multiplier*partial_r2(lm(y~u+x+w+xu+xw,data = data),"u")
+    r2_y_u_red <- multiplier*partial_r2(lm(y~u+x+w+xw,data = data),"u")
+  }
+
+  gamma_1 <- sqrt(r2_x_u)*sqrt(r2_y_u_full)/(sqrt(1-r2_y_u_red)*sqrt(1-r2_x_u))
+
+  ## unobserved treatment effect heterogeneity
+  ## no multiplier for now
+  if (benchmark){
+    r2_y_xu_full_possible <- c()
+    r2_xu_u_possible <- c()
+    
+    for (covariate in covariates){
+      r2_y_xu_full_possible <- c(r2_y_xu_full_possible,
+                                 partial_r2(lm(y~x+w+x:w1 + x:w2 + x:w3,data = data),
+                                            paste0("x",":",covariate)))
+      # reduced is the same as full in this case
+      
+      # double for loop for i and j
+      for (covariate_2 in covariates){
+        if (covariate != covariate_2){
+          formula_1_2 <- as.formula(paste(c(paste0("x*",covariate),paste0("x:",covariate_2)),
+                                          collapse = "~"))
+          
+          r2_xu_u_possible <- c(r2_xu_u_possible,summary(lm(formula_1_2, data = data))$r.squared)
+        }
+      }
+      r2_y_xu_full <- max(r2_y_xu_full_possible)
+      r2_y_xu_red <- max(r2_y_xu_full_possible)
+      r2_xu_u <- max(r2_xu_u_possible)
+    }
+    
+  }else{
+    r2_y_xu_full <- partial_r2(lm(y~xu+x+w+u+xw,data = data),"xu")
+    r2_y_xu_red <- partial_r2(lm(y~xu+x+w+xw,data = data),"xu")
+    r2_xu_u <- summary(lm(xu~xw,data = data))$r.squared
+  }
+  
+  gamma_2 <- sqrt(1-r2_y_xu_red)*sqrt(1-r2_xu_u)/sqrt(r2_y_xu_full)
+  
+  return(gamma_1*gamma_2)
+}
+```
+
+```{r}
+benchmark_theta_trthet <- function(data,covariates,benchmark){
+  if(benchmark){
+    x_zu_possible <- c()
+    for (covariate in covariates){
+      formula_zu <- as.formula(paste(c("x",paste0("z:",covariate)),collapse = "~"))
+      x_zu_possible <- c(x_zu_possible,summary(lm(formula_zu,data = data))$r.squared)
+    }
+    return(max(x_zu_possible))
+  }else{
+    return(summary(lm(x~zu,data = data))$r.squared)
+  }
+}
+```
+
+# Overarching function
+
+```{r}
+produce_new_trt_het_plot <- function(data, case = "a",benchmark = FALSE){
+# get observed quantity estimate
+  obs_lambda <- get_obs_lambda_trthet(data,case)
+  
+  # benchmark thetas
+  benchmarks_trthet_r2 <- benchmark_theta_trthet(data,c("w1","w2","w3"),benchmark=benchmark)
+
+  break_even_gamma <- obs_lambda*sqrt(benchmarks_trthet_r2)
+
+  multipliers <- c(0.25,0.5,1,1.25,1.5)
+  gamma_mult_dict <- hash()
+  inconsistency_mult_dict <- hash()
+  theta_I_dict <- hash()
+  
+  for (multiplier in multipliers){
+    
+    current_gamma <- benchmark_gamma_trthet(data,c("w1","w2","w3"),multiplier = multiplier,benchmark=benchmark)
+    
+    gamma_mult_dict[[as.character(multiplier)]] <- current_gamma
+    
+    # we can calculate the relative inconsistency because lambda_4/lambda_3 = theta*gamma/lambda approximately
+    theta_I_dict[[as.character(multiplier)]] <- current_gamma^2/obs_lambda^2
+    
+    inconsistency_mult_dict[[as.character(multiplier)]] <- obs_lambda*sqrt(benchmarks_trthet_r2)/current_gamma
+  }
+  
+  # see if 
+  
+  legend_labels <- c(as.character(paste0("Ambivalence Anchor Point;\nU-Z Benchmarked Violation ",round(benchmarks_trthet_r2,3))),
+                     as.character(paste0("Multiplier = 0.5; U-Z Strength Required ",round(theta_I_dict[["0.5"]],3))),
+                     as.character(paste0("Multiplier = 1; U-Z Strength Required ",round(theta_I_dict[["1"]],3))),
+                     as.character(paste0("Multiplier = 1.5; U-Z Strength Required ",round(theta_I_dict[["1.5"]],3))))
+  
+  legend_values <- setNames(c("black","red","purple","blue"),legend_labels)
+  
+  #text_ols <- textGrob("OLS",gp = gpar(fontsize = 12, fontface = "italic"))
+  text_demark <- textGrob("\u2190 2SLS | OLS \u2192 ",gp = gpar(fontsize = 12))
+  #text_2sls <- textGrob("2SLS",gp = gpar(fontsize = 12, fontface = "italic"))
+  
+  final_plot <- (ggplot() +
+                   # break_even segment
+                   geom_segment(aes(x = 1, xend = 1, y = 0, yend = break_even_gamma, color = legend_labels[1],linetype=legend_labels[1])) +
+                   geom_segment(aes(x = 0, xend = 1, y = break_even_gamma, yend = break_even_gamma, color = legend_labels[1], linetype=legend_labels[1])) +
+                   
+                   # 0.25 multiplier
+                   #geom_segment(aes(x = inconsistency_mult_dict[["0.25"]], xend = inconsistency_mult_dict[["0.25"]], y = 0, yend = gamma_mult_dict[["0.25"]], colour = "0.25")) +
+                   #geom_segment(aes(x = 0, xend = inconsistency_mult_dict[["0.25"]], y = gamma_mult_dict[["0.25"]], yend = gamma_mult_dict[["0.25"]], colour = "0.25")) + 
+                   
+                   # 0.5 multiplier
+                   geom_segment(aes(x = inconsistency_mult_dict[["0.5"]], xend = inconsistency_mult_dict[["0.5"]], y = 0, yend = gamma_mult_dict[["0.5"]], 
+                                    color = legend_labels[2],linetype=legend_labels[2])) +
+                   geom_segment(aes(x = 0, xend = inconsistency_mult_dict[["0.5"]], y = gamma_mult_dict[["0.5"]], yend = gamma_mult_dict[["0.5"]], 
+                                    color = legend_labels[2],linetype=legend_labels[2])) + 
+                   
+                   # 1 multiplier
+                   geom_segment(aes(x = inconsistency_mult_dict[["1"]], xend = inconsistency_mult_dict[["1"]], y = 0, yend = gamma_mult_dict[["1"]],
+                                color = legend_labels[3],linetype=legend_labels[3])) +
+                   geom_segment(aes(x = 0, xend = inconsistency_mult_dict[["1"]], y = gamma_mult_dict[["1"]], yend = gamma_mult_dict[["1"]], 
+                                    color = legend_labels[3],linetype=legend_labels[3])) + 
+                   
+                   # 1.25 multiplier
+                   #geom_segment(aes(x = inconsistency_mult_dict[["1.25"]], xend = inconsistency_mult_dict[["1.25"]], y = 0, yend = gamma_mult_dict[["1.25"]], colour = "1.25")) +
+                   #geom_segment(aes(x = 0, xend = inconsistency_mult_dict[["1.25"]], y = gamma_mult_dict[["1.25"]], yend = gamma_mult_dict[["1.25"]], colour = "0.25")) +   
+                   
+                   # 1.5 multiplier
+                   geom_segment(aes(x = inconsistency_mult_dict[["1.5"]], xend = inconsistency_mult_dict[["1.5"]], y = 0, yend = gamma_mult_dict[["1.5"]], 
+                                    color = legend_labels[4],linetype=legend_labels[4])) +
+                   geom_segment(aes(x = 0, xend = inconsistency_mult_dict[["1.5"]], y = gamma_mult_dict[["1.5"]], yend = gamma_mult_dict[["1.5"]], 
+                                    color = legend_labels[4],linetype=legend_labels[4])) +                   
+      
+                  # # labels first
+                  #  ## break even
+                  #  geom_label(aes(x = 1,y = break_even_gamma), label = paste("ER B",round(theta12_b[["theta1_b"]],3)),hjust = -0.2, vjust = 0.5) +
+                  #  ## multiplier: 0.25
+                  #  #geom_label(aes(x = inconsistency_mult_dict[["0.25"]],y = gamma_mult_dict[["0.25"]]), label = paste("Equate ER",round(theta_I_dict[["0.25"]]^2,3)),hjust = -0.2, vjust = 0.5) +
+                  #  ## multiplier: 0.5
+                  #  geom_label(aes(x = inconsistency_mult_dict[["0.5"]],y = gamma_mult_dict[["0.5"]]), label = paste("ER Req.",round(theta_I_dict[["0.5"]],3)),hjust = -0.2, vjust = 0.5) +
+                  #  ## multiplier: 1
+                  #  geom_label(aes(x = inconsistency_mult_dict[["1"]],y = gamma_mult_dict[["1"]]), label = paste("ER Req.",round(theta_I_dict[["1"]],3)),hjust = -0.2, vjust = 0.5) +
+                  #  ## multiplier: 1.25
+                  #  #geom_label(aes(x = inconsistency_mult_dict[["1.25"]],y = gamma_mult_dict[["1.25"]]), label = paste("Equate ER",round(theta_I_dict[["1.25"]]^2,3)),hjust = -0.2, vjust = 0.5) +
+                  #  ## multiplier: 1.5
+                  #  geom_label(aes(x = inconsistency_mult_dict[["1.5"]],y = gamma_mult_dict[["1.5"]]), label = paste("ER Req.",round(theta_I_dict[["1.5"]],3)),hjust = -0.2, vjust = 0.5) +
+                  #scale_color_manual(labels = legend_labels, values = c("black","darkred","darkgreen","darkblue")) +
+                  scale_color_manual(name = "Scenario", values = legend_values) +
+                  scale_linetype_manual(name = "Scenario", values = setNames(c(2,1,1,1),legend_labels)) + 
+                  labs(color = "Scenario") + 
+                  theme_bw() + xlab("\n\nInconsistency Ratio") + ylab("Unobserved Confounding") + 
+                  #annotation_custom(text_ols, xmin = 1.5, xmax = 1.5, ymin = -0.08, ymax = -0.08) +
+                  annotation_custom(text_demark, xmin = 1, xmax = 1, ymin = -max(break_even_gamma,gamma_mult_dict[["1.5"]])/7, 
+                                    ymax = -max(break_even_gamma,gamma_mult_dict[["1.5"]])/7) + 
+                  #annotation_custom(text_2sls, xmin = 0.5, xmax = 0.5, ymin = -0.08, ymax = -0.08) +
+                  coord_cartesian(clip = "off") +
+                  ylim(c(0,max(break_even_gamma,gamma_mult_dict[["1.5"]]))) +
+                  xlim(c(0,2.75))
+  )
+  
+  #implied_inconsistency difference <- c()
+  return(final_plot)
+}
+```
+
+# Experiments
+
+```{r}
+b1 = 0.1
+b2 = 0.2
+b3 = 0.1
+b4 = 0.2
+b5 = 0.1
+
+a1 = 0.45
+a2 = 0.2
+#a3 = 0.15
+a4 = 0.2
+a5 = 0.15
+```
+
+```{r,fig.height=4,fig.width=10}
+data_test <- generate_data_trthet(a1,a2,a3=0,a4,a5=0,b1,b2,b3,b4,b5, seed = 33,n_generate = 1000)
+produce_new_trt_het_plot(data_test, case = "a",TRUE)
+#produce_new_trt_het_plot(data_test, case = "b")
+```
+
+```{r,fig.height=4,fig.width=10}
+data_test <- generate_data_trthet(a1,a2,a3=0.05,a4,a5,b1,b2,b3,b4,b5, seed = 21,n_generate = 5000)
+produce_new_trt_het_plot(data_test)
+produce_new_trt_het_plot(data_test, case = "b")
+```
+
+```{r,fig.height=4,fig.width=10}
+data_test <- generate_data_trthet(a1,a2,a3=0.1,a4,a5,b1,b2,b3,b4,b5, seed = 21,n_generate = 5000)
+produce_new_trt_het_plot(data_test)
+produce_new_trt_het_plot(data_test, case = "b")
+```
+
+```{r,fig.height=4,fig.width=10}
+data_test <- generate_data_trthet(a1,a2,a3=0.2,a4,a5,b1,b2,b3,b4,b5,seed = 33,n_generate = 1000)
+produce_new_trt_het_plot(data_test,benchmark = TRUE)
+```
+```{r,fig.height=4,fig.width=10}
+data_test <- generate_data_trthet(a1,a2,a3=0.3,a4,a5,b1,b2,b3,b4,b5, seed = 33,n_generate = 1000)
+produce_new_trt_het_plot(data_test,benchmark = TRUE)
+#produce_new_trt_het_plot(data_test,TRUE,case = "b")
+```
+

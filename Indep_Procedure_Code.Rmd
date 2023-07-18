@@ -1,0 +1,406 @@
+---
+title: 'Bayesian Sensitivity Analysis: Independence'
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r, echo = FALSE}
+library(MASS)
+library(HardyWeinberg)
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+library(hash)
+library(ppcor)
+library(sensemakr)
+library(latex2exp)
+```
+
+# Create Fake Data
+
+```{r, echo = FALSE}
+generate_data_ind <- function(c0,c1,c2,c3,c4,c5,c6,c7,seed = 500,print = TRUE,n_generate = 500){
+  set.seed(seed)
+  # data generating mechanism
+  u <- rnorm(n_generate)
+  
+  w1 <- rnorm(n_generate)
+  w2 <- rnorm(n_generate)
+  w3 <- rnorm(n_generate)
+  
+  w_pca <- prcomp(cbind(w1,w2,w3))
+  
+  w <- cbind(w1,w2,w3) %*% w_pca$rotation[,1]
+  w_pc2 <- cbind(w1,w2,w3) %*% w_pca$rotation[,2]
+  
+  sigma_e3 <- rnorm(n_generate,0,sqrt(1-c4^2-c7^2))
+  
+  z <- c4*u + c7*w + sigma_e3
+  
+  
+  sigma_e1 <- rnorm(n_generate,0,sqrt(1-(c1^2 + c3^2 + c5^2 + 2*c1*c3*c4 + 2*c3*c5*c7)))
+  x <- c3*z + c1*u + c5*w + sigma_e1
+  
+  sigma_e2 <- rnorm(n_generate,0,sqrt(1-(c0^2 + (2*(c1+c3*c4)*c2*c0) + c2^2 + c6^2 + 2*c0*c6*(c5+c7*c3))))
+  y <- c0*x + c2*u + c6*w + sigma_e2
+  
+  data <- data.frame(cbind(x,y,z,u,w,w1,w2,w3,w_pc2))
+  names(data) <- c("x","y","z","u","w","w1","w2","w3","w_pc2")
+  
+  if (print){
+    print(sqrt(1-c4^2-c7^2))
+    print(1-(c1^2 + c3^2 + c5^2 + 2*c1*c3*c4 + 2*c3*c5*c7))
+    print(1-(c0^2 + (2*(c1+c3*c4)*c2*c0) + c2^2 + c6^2 + 2*c0*c6*(c5+c7*c3)))
+    
+    print(paste("OLS",(c1*c2*(1-c4^2-c7^2)/(1-c7^2))/(1-(c5+c3*c7)^2-(1-c7^2)*(c3+(c1*c4/(1-c7^2)))^2)))
+    print(paste("2SLS",c2*c4/(c3*(1-c7^2)+c1*c4)))
+  }
+
+  return(data)
+}
+```
+
+# Step 1: Estimate Quantities
+
+```{r, echo = FALSE}
+# get_obs_lambda_ind <- function(data){
+#   # We will have lambda_a and lambda_b
+# 
+#   # First root quantities
+#   r2_xw <- cor(data$x,data$w)^2
+#   r2_zw <- cor(data$z,data$w)^2
+#   r2_xz_w <- partial_r2(lm(x~z+w,data = data),"z")
+# 
+#   var_x_zw <- var(residuals(lm(x ~ z + w, data = data)))
+#   sd_zw <- sd(residuals(lm(z ~ w, data = data)))
+# 
+#   return_hash <- hash()
+# 
+#   return_hash[["lambda_a"]] = (1-r2_xw-(1-r2_zw)*r2_xz_w)/var_x_zw
+#   return_hash[["lambda_b"]] = r2_xz_w
+#   return_hash[["lambda_c"]] = sqrt(1-r2_xz_w)/sd_zw
+# 
+#   return(return_hash)
+# }
+```
+
+```{r, echo = FALSE}
+get_obs_lambda_ind <- function(data){
+  # We will have lambda_a and lambda_b
+  
+  r2_xz_w <- partial_r2(lm(x~z+w,data = data),"z")
+  sd_xw <- sd(residuals(lm(x ~ w, data = data)))
+  sd_zw <- sd(residuals(lm(z ~ w, data = data)))
+  sd_xzw <- sd(residuals(lm(x~z+w,data = data)))
+  
+  return((sqrt(r2_xz_w)*sd_xw*sd_zw*sd_xzw)/(sd_xw^2 - sd_zw^2*r2_xz_w))
+}
+```
+
+# Step 2: Find values of theta necessary for c_star
+
+```{r, echo = FALSE}
+# can reuse 
+theta_function <- function(theta_1,theta_2){sqrt(theta_1)/sqrt(theta_2)}
+```
+
+```{r,echo = FALSE}
+benchmark_theta_ind <- function(data,covariate_cols,IV_strength,benchmark_ind){
+  
+  # theta_1 is r2_xu_zw
+  # theta_2 is r2_u_z
+  
+  # need to "duplicate" u in terms of w
+  
+  #for (col in covariates){
+  #  formula_x_w <- as.formula(paste(c(col,paste(c("x","z",condition_cols),collapse = "+")),collapse = "~"))
+  #  b_theta_1 <- c(b_theta_1,partial_r2(lm(formula_x_w,data = data)))
+  #}
+  
+  b_r2_x_u <- c()
+  b_r2_z_u_w <- c()
+  b_r2_z_u <- c()
+  
+  formula_x_u_w <- as.formula(paste(c("x",paste(c("z",covariate_cols),collapse = "+")),
+                                      collapse = "~"))
+  
+  formula_z_u_w <- as.formula(paste(c("z",paste(covariate_cols,collapse = "+")),collapse = "~"))
+
+  for (col in covariate_cols){
+    b_r2_x_u <- c(b_r2_x_u,partial_r2(lm(formula_x_u_w,data = data),col))
+    b_r2_z_u_w <- c(b_r2_z_u_w,partial_r2(lm(formula_z_u_w,data = data),col))
+    b_r2_z_u <- c(b_r2_z_u,cor(data$z,data[,col])^2)
+  }
+  
+  return_dict = hash()
+  return_dict[["r2_xu"]] = max(b_r2_x_u)
+  return_dict[["r2_zuw"]] = max(b_r2_z_u_w)
+  return_dict[["r2_zu"]] = max(b_r2_z_u)
+  
+  # # ground truth for testing purposes only
+  if (benchmark_ind){
+    return_dict[["r2_xu"]] = partial_r2(lm(x~u+w+z,data = data),"u")
+    return_dict[["r2_zuw"]] = partial_r2(lm(z~u+w,data = data),"u")
+    return_dict[["r2_zu"]] = cor(data$z,data$u)^2
+  }
+
+  return(return_dict)
+}
+```
+
+# Overarching function
+
+```{r,echo=FALSE}
+produce_new_ind_plot <- function(data,covariate_cols,benchmark_ind = FALSE){
+# get observed quantity estimate
+  obs_lambda <- get_obs_lambda_ind(data)
+  
+  # benchmark thetas
+  benchmarks_ind <- benchmark_theta_ind(data,covariate_cols,cor(data$x,data$z),benchmark_ind)
+
+  break_even_r2_conf <- benchmarks_ind[["r2_zu"]]/(sqrt(1-benchmarks_ind[["r2_zuw"]])*obs_lambda^2)
+  
+  #print(round(implied_theta^2,3))
+  #print(round(theta12_b[["theta1_b"]]^2,3))
+  
+  #actual_inconsistency = obs_lambda*sqrt(theta12_b[["theta1_b"]])/benchmark_gamma
+  
+  # final_plot <- (ggplot() + geom_segment(aes(x = 1,xend = 1,y = 0, yend = break_even_gamma)) +
+  #                  geom_segment(aes(x = 0,xend = 1,y = break_even_gamma, yend = break_even_gamma)) +
+  #                  geom_segment(aes(x = actual_inconsistency,xend = actual_inconsistency,y = 0, yend = benchmark_gamma, colour = "blue")) +
+  #                  geom_segment(aes(x = 0,xend = actual_inconsistency,y = benchmark_gamma, yend = benchmark_gamma,colour = "blue"))
+  #                )
+  
+  multipliers <- c(0.25,0.5,1,1.25,1.5)
+  gamma_mult_dict <- hash()
+  inconsistency_mult_dict <- hash()
+  theta_I_dict <- hash()
+  
+  for (multiplier in multipliers){
+    
+    current_r2_xu <- multiplier*benchmarks_ind[["r2_xu"]]
+    
+    gamma_mult_dict[[as.character(multiplier)]] <- current_r2_xu
+  
+    # calculating R^2_Z_U
+
+    theta_I_dict[[as.character(multiplier)]] <- current_r2_xu*obs_lambda^2/(1+(current_r2_xu*obs_lambda^2)/(1-cor(data$z,data$w)^2))
+    
+    # we can calculate the relative inconsistency because lambda_4/lambda_3 = theta*gamma/lambda approximately
+    inconsistency_mult_dict[[as.character(multiplier)]] <- (sqrt(benchmarks_ind[["r2_zu"]])/(sqrt(1-benchmarks_ind[["r2_zuw"]]))) * 1/(sqrt(current_r2_xu)*obs_lambda)
+  }
+  
+  # if (log_x_scale){
+  #   # convert to log scale
+  #   min_value <- 
+  #   for (key in inconsistency_mult_dict$keys()) {
+  #     value <- inconsistency_mult_dict$get(key)
+  #     transformed_value <- log(value)
+  #     inconsistency_mult_dict$set(key, transformed_value)
+  #   }
+  #   ambivalence_x = 0
+  #   ambivalence_x_min = min()
+  # }else{
+  #   ambivalence_x = 1
+  #   ambivalence_x_min = 0
+  # }
+  
+  legend_labels <- c(as.character(paste0("Ambivalence Anchor Point;\nBenchmarked Indep. Violation ",round(benchmarks_ind[["r2_zu"]],3))),
+                     as.character(paste0("Multiplier = 0.5; Indep. Violation Required ",round(theta_I_dict[["0.5"]],3))),
+                     as.character(paste0("Multiplier = 1; Indep. Violation Required ",round(theta_I_dict[["1"]],3))),
+                     as.character(paste0("Multiplier = 1.5; Indep.Violation Required ",round(theta_I_dict[["1.5"]],3))))
+  
+  legend_values <- setNames(c("black","red","purple","blue"),legend_labels)
+  
+  #text_ols <- textGrob("OLS",gp = gpar(fontsize = 12, fontface = "italic"))
+  text_demark <- textGrob("\u2190 2SLS | OLS \u2192 ",gp = gpar(fontsize = 12))
+  #text_2sls <- textGrob("2SLS",gp = gpar(fontsize = 12, fontface = "italic"))
+  
+  final_plot <- (ggplot() +
+                   # break_even segment
+                   geom_segment(aes(x = 1, xend = 1, y = 0, yend = break_even_r2_conf, color = legend_labels[1],linetype=legend_labels[1])) +
+                   geom_segment(aes(x = 0, xend = 1, y = break_even_r2_conf, yend = break_even_r2_conf, color = legend_labels[1], linetype=legend_labels[1])) +
+                   
+                   # 0.25 multiplier
+                   #geom_segment(aes(x = inconsistency_mult_dict[["0.25"]], xend = inconsistency_mult_dict[["0.25"]], y = 0, yend = gamma_mult_dict[["0.25"]], colour = "0.25")) +
+                   #geom_segment(aes(x = 0, xend = inconsistency_mult_dict[["0.25"]], y = gamma_mult_dict[["0.25"]], yend = gamma_mult_dict[["0.25"]], colour = "0.25")) + 
+                   
+                   # 0.5 multiplier
+                   geom_segment(aes(x = inconsistency_mult_dict[["0.5"]], xend = inconsistency_mult_dict[["0.5"]], y = 0, yend = gamma_mult_dict[["0.5"]], 
+                                    color = legend_labels[2],linetype=legend_labels[2])) +
+                   geom_segment(aes(x = 0, xend = inconsistency_mult_dict[["0.5"]], y = gamma_mult_dict[["0.5"]], yend = gamma_mult_dict[["0.5"]], 
+                                    color = legend_labels[2],linetype=legend_labels[2])) + 
+                   
+                   # 1 multiplier
+                   geom_segment(aes(x = inconsistency_mult_dict[["1"]], xend = inconsistency_mult_dict[["1"]], y = 0, yend = gamma_mult_dict[["1"]],
+                                color = legend_labels[3],linetype=legend_labels[3])) +
+                   geom_segment(aes(x = 0, xend = inconsistency_mult_dict[["1"]], y = gamma_mult_dict[["1"]], yend = gamma_mult_dict[["1"]], 
+                                    color = legend_labels[3],linetype=legend_labels[3])) + 
+                   
+                   # 1.25 multiplier
+                   #geom_segment(aes(x = inconsistency_mult_dict[["1.25"]], xend = inconsistency_mult_dict[["1.25"]], y = 0, yend = gamma_mult_dict[["1.25"]], colour = "1.25")) +
+                   #geom_segment(aes(x = 0, xend = inconsistency_mult_dict[["1.25"]], y = gamma_mult_dict[["1.25"]], yend = gamma_mult_dict[["1.25"]], colour = "0.25")) +   
+                   
+                   # 1.5 multiplier
+                   geom_segment(aes(x = inconsistency_mult_dict[["1.5"]], xend = inconsistency_mult_dict[["1.5"]], y = 0, yend = gamma_mult_dict[["1.5"]], 
+                                    color = legend_labels[4],linetype=legend_labels[4])) +
+                   geom_segment(aes(x = 0, xend = inconsistency_mult_dict[["1.5"]], y = gamma_mult_dict[["1.5"]], yend = gamma_mult_dict[["1.5"]], 
+                                    color = legend_labels[4],linetype=legend_labels[4])) +                   
+      
+                  # # labels first
+                  #  ## break even
+                  #  geom_label(aes(x = 1,y = break_even_gamma), label = paste("ER B",round(theta12_b[["theta1_b"]],3)),hjust = -0.2, vjust = 0.5) +
+                  #  ## multiplier: 0.25
+                  #  #geom_label(aes(x = inconsistency_mult_dict[["0.25"]],y = gamma_mult_dict[["0.25"]]), label = paste("Equate ER",round(theta_I_dict[["0.25"]]^2,3)),hjust = -0.2, vjust = 0.5) +
+                  #  ## multiplier: 0.5
+                  #  geom_label(aes(x = inconsistency_mult_dict[["0.5"]],y = gamma_mult_dict[["0.5"]]), label = paste("ER Req.",round(theta_I_dict[["0.5"]],3)),hjust = -0.2, vjust = 0.5) +
+                  #  ## multiplier: 1
+                  #  geom_label(aes(x = inconsistency_mult_dict[["1"]],y = gamma_mult_dict[["1"]]), label = paste("ER Req.",round(theta_I_dict[["1"]],3)),hjust = -0.2, vjust = 0.5) +
+                  #  ## multiplier: 1.25
+                  #  #geom_label(aes(x = inconsistency_mult_dict[["1.25"]],y = gamma_mult_dict[["1.25"]]), label = paste("Equate ER",round(theta_I_dict[["1.25"]]^2,3)),hjust = -0.2, vjust = 0.5) +
+                  #  ## multiplier: 1.5
+                  #  geom_label(aes(x = inconsistency_mult_dict[["1.5"]],y = gamma_mult_dict[["1.5"]]), label = paste("ER Req.",round(theta_I_dict[["1.5"]],3)),hjust = -0.2, vjust = 0.5) +
+                  #scale_color_manual(labels = legend_labels, values = c("black","darkred","darkgreen","darkblue")) +
+                  scale_color_manual(name = "Scenario", values = legend_values) +
+                  scale_linetype_manual(name = "Scenario", values = setNames(c(2,1,1,1),legend_labels)) + 
+                  labs(color = "Scenario") + 
+                  theme_bw() + xlab("\n\nInconsistency Ratio") + ylab("Unobserved Confounding") + 
+                  #annotation_custom(text_ols, xmin = 1.5, xmax = 1.5, ymin = -0.08, ymax = -0.08) +
+                  annotation_custom(text_demark, xmin = 1, xmax = 1, ymin = -max(break_even_r2_conf,gamma_mult_dict[["1.5"]])/7, 
+                                    ymax = -max(break_even_r2_conf,gamma_mult_dict[["1.5"]])/7) + 
+                  #annotation_custom(text_2sls, xmin = 0.5, xmax = 0.5, ymin = -0.08, ymax = -0.08) +
+                  coord_cartesian(clip = "off") +
+                  ylim(c(0,max(break_even_r2_conf,gamma_mult_dict[["1.5"]]))) +
+                  xlim(c(0,2))
+                  # annotation_custom(geom = "text", x = 0.5, y = 0, label = "2SLS", color = "black", size=4) +
+                  # annotation_custom(geom = "text", x = 1.5 , y = 0, label = "OLS", color = "black", size=4) +
+                 )
+
+  # final_plot <- (ggplot() +
+  #                  # break_even segment
+  #                  geom_segment(aes(x = 1, xend = 1, y = 0, yend = break_even_r2_conf),linetype="dashed") +
+  #                  geom_segment(aes(x = 0, xend = 1, y = break_even_r2_conf, yend = break_even_r2_conf),linetype="dashed") +
+  #                  
+  #                  # 0.25 multiplier
+  #                  #geom_segment(aes(x = inconsistency_mult_dict[["0.25"]], xend = inconsistency_mult_dict[["0.25"]], y = 0, yend = gamma_mult_dict[["0.25"]], colour = "0.25")) +
+  #                  #geom_segment(aes(x = 0, xend = inconsistency_mult_dict[["0.25"]], y = gamma_mult_dict[["0.25"]], yend = gamma_mult_dict[["0.25"]], colour = "0.25")) + 
+  #                  
+  #                  # 0.5 multiplier
+  #                  geom_segment(aes(x = inconsistency_mult_dict[["0.5"]], xend = inconsistency_mult_dict[["0.5"]], y = 0, yend = gamma_mult_dict[["0.5"]], colour = "0.5")) +
+  #                  geom_segment(aes(x = 0, xend = inconsistency_mult_dict[["0.5"]], y = gamma_mult_dict[["0.5"]], yend = gamma_mult_dict[["0.5"]], colour = "0.5")) + 
+  #                  
+  #                  # 1 multiplier
+  #                  geom_segment(aes(x = inconsistency_mult_dict[["1"]], xend = inconsistency_mult_dict[["1"]], y = 0, yend = gamma_mult_dict[["1"]], colour = "1")) +
+  #                  geom_segment(aes(x = 0, xend = inconsistency_mult_dict[["1"]], y = gamma_mult_dict[["1"]], yend = gamma_mult_dict[["1"]], colour = "1")) + 
+  #                  
+  #                  # 1.25 multiplier
+  #                  #geom_segment(aes(x = inconsistency_mult_dict[["1.25"]], xend = inconsistency_mult_dict[["1.25"]], y = 0, yend = gamma_mult_dict[["1.25"]], colour = "1.25")) +
+  #                  #geom_segment(aes(x = 0, xend = inconsistency_mult_dict[["1.25"]], y = gamma_mult_dict[["1.25"]], yend = gamma_mult_dict[["1.25"]], colour = "0.25")) +   
+  #                  
+  #                  # 1.5 multiplier
+  #                  geom_segment(aes(x = inconsistency_mult_dict[["1.5"]], xend = inconsistency_mult_dict[["1.5"]], y = 0, yend = gamma_mult_dict[["1.5"]], colour = "1.5")) +
+  #                  geom_segment(aes(x = 0, xend = inconsistency_mult_dict[["1.5"]], y = gamma_mult_dict[["1.5"]], yend = gamma_mult_dict[["1.5"]], colour = "1.5")) +                    
+  #             
+  # 
+  #                 # labels first
+  #                  ## break even
+  #                  geom_label(aes(x = 1,y = break_even_r2_conf), label = paste("U-Z B",round(benchmarks_ind[["r2_zu"]],3)),hjust = -0.2, vjust = 0.5) +
+  #                  ## multiplier: 0.25
+  #                  #geom_label(aes(x = inconsistency_mult_dict[["0.25"]],y = gamma_mult_dict[["0.25"]]), label = paste("Equate ER",round(theta_I_dict[["0.25"]]^2,3)),hjust = -0.2, vjust = 0.5) +
+  #                  ## multiplier: 0.5
+  #                  geom_label(aes(x = inconsistency_mult_dict[["0.5"]],y = gamma_mult_dict[["0.5"]]), label = paste("U-Z Req.",round(theta_I_dict[["0.5"]],3)),hjust = -0.2, vjust = 0.5) +
+  #                  ## multiplier: 1
+  #                  geom_label(aes(x = inconsistency_mult_dict[["1"]],y = gamma_mult_dict[["1"]]), label = paste("U-Z Req.",round(theta_I_dict[["1"]],3)),hjust = -0.2, vjust = 0.5) +
+  #                  ## multiplier: 1.25
+  #                  #geom_label(aes(x = inconsistency_mult_dict[["1.25"]],y = gamma_mult_dict[["1.25"]]), label = paste("Equate ER",round(theta_I_dict[["1.25"]]^2,3)),hjust = -0.2, vjust = 0.5) +
+  #                  ## multiplier: 1.5
+  #                  geom_label(aes(x = inconsistency_mult_dict[["1.5"]],y = gamma_mult_dict[["1.5"]]), label = paste("U-Z Req.",round(theta_I_dict[["1.5"]],3)),hjust = -0.2, vjust = 0.5) +
+  #                 scale_x_continuous(expand = expansion(add = c(0, 1.5))) + theme_bw() + xlab("Inconsistency Ratio") + ylab("Unobserved Confounding") +
+  #                  annotate(geom = "text", x = 0.5, y = 0, label = "2SLS", color = "black", size=4) +
+  #                  annotate(geom = "text", x = 1.5 , y = 0, label = "OLS", color = "black", size=4)
+  #                )
+  # 
+  #                  
+  #print(paste("ratio",actual_gamma/break_even_gamma))
+  # difference by %
+  #implied_inconsistency difference <- c()
+  return(final_plot)
+}
+
+# if we are out of bounds then the x-axis will be wrong...
+```
+
+
+# Experiments
+
+```{r}
+c0 = 0.1
+c1 = 0.4
+c2 = 0.4
+#c3
+#c4
+c5 = 0.4
+c6 = 0.4
+#c7 = 0.2
+```
+
+## Weak IV
+
+```{r,fig.height=4,fig.width=10}
+data <- generate_data_ind(c0,c1,c2,c3 = 0.5,c4 = 0,c5,c6,c7=0)
+produce_new_ind_plot(data,500,dogmatism_set = 0.8,c_star = 0.5,uncertainty_mult_ub=1)
+```
+
+```{r,fig.height=4,fig.width=10}
+data <- generate_data_ind(c0,c1,c2,c3 = 0.15,c4 = 0.10,c5,c6,c7=0.15,n_generate = 1000)
+produce_new_ind_plot(data,c("w1","w2","w3"),benchmark_ind = FALSE)
+```
+
+```{r,fig.height=4,fig.width=10}
+data <- generate_data_ind(c0,c1,c2,c3 = 0.1,c4 = 0.25,c5,c6,c7=0.25,n_generate = 1000)
+produce_new_ind_plot(data,c("w1","w2","w3"),benchmark_ind = FALSE)
+```
+
+## Moderate IV
+
+```{r,fig.height=4,fig.width=10}
+data <- generate_data_ind(c0,c1,c2,c3 = 0.25,c4 = 0,c5,c6,c7=0)
+produce_new_ind_plot(data,c("w1","w2","w3"),benchmark_ind = FALSE)
+```
+
+```{r,fig.height=4,fig.width=10}
+data <- generate_data_ind(c0,c1,c2,c3 = 0.25,c4 = 0.16,c5,c6,c7=0.1)
+produce_new_ind_plot(data,c("w1","w2","w3"),benchmark_ind = TRUE)
+```
+
+```{r,fig.height=4,fig.width=10}
+data <- generate_data_ind(c0,c1,c2,c3 = 0.25,c4 = 0.35,c5,c6,c7=0.35)
+produce_new_ind_plot(data,500,dogmatism_set = 0,c_star = 0.5,uncertainty_mult_ub=1)
+```
+
+## Strong IV
+
+```{r,fig.height=4,fig.width=10}
+data <- generate_data_ind(c0,c1,c2,c3 = 0.4,c4 = 0.0,c5,c6,c7=0)
+produce_new_ind_plot(data,c("w1","w2","w3"),benchmark_ind = TRUE)
+```
+
+```{r,fig.height=4,fig.width=10}
+data <- generate_data_ind(c0,c1,c2,c3 = 0.4,c4 = 0.4,c5,c6,c7=0.4,seed = 5)
+produce_new_ind_plot(data,c("w1","w2","w3"),benchmark_ind = TRUE)
+```
+
+```{r,fig.height=4,fig.width=10}
+data <- generate_data_ind(c0,c1,c2,c3 = 0.4,c4 = 0.6,c5,c6,c7=0.6, seed = 5)
+produce_new_ind_plot(data,c("w1","w2","w3"),benchmark_ind = TRUE)
+```
+Probably maxed out on variance for this...
+
+```{r,fig.height=4,fig.width=10}
+data <- generate_data_ind(c0,c1,c2,c3 = 0.4,c4 = 0.8,c5,c6,c7=0.15)
+produce_new_ind_plot(data,500,dogmatism_set = 0.9,c_star = 0.5,uncertainty_mult_ub=1)
+```
+

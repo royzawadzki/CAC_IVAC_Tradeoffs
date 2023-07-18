@@ -1,0 +1,1152 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r}
+library(ivreg)
+library(ggplot2)
+library(plotly)
+library(akima)
+library(quadprog)
+library(lpSolve)
+library(sensemakr)
+```
+
+# Finding suitable edge weights
+
+Under the restriction of variance 1, we cannot just simply change one edge (e.g. strength) and just make up arbitrary values of the others. This will lead to inaccurate results (see Stokes et al 2022).
+
+This derivation will depend on the DAG but we are just making sure the variance adds up to 1. Another problem is the random error term, which we do not know so we will simply bound the value of the coefficients (maybe take upperbound)
+
+```{r}
+quad <- function(a, b, c)
+{
+  a <- as.complex(a)
+  answer <- c((-b + sqrt(b^2 - 4 * a * c)) / (2 * a),
+              (-b - sqrt(b^2 - 4 * a * c)) / (2 * a))
+  if(all(Im(answer) == 0)) answer <- Re(answer)
+  if(answer[1] == answer[2]) return(answer[1])
+  answer
+}
+```
+
+# Simple simulation
+
+```{r}
+#getting bounds on the relevant coefficients
+c0 <- 0.3
+c1 <- 0.5
+sqrt(1-c1^2)
+c3 <- 0.5
+
+sqrt(1-c0^2)
+quad(a = 1,b = 2*c0*c1, c = -1)
+c2 <- 0.5
+
+c5 <- 0.5
+c6 <- 0.5
+
+sigma_e1 <- sqrt(1 - c3^2 - c1^2 - c5^2)
+sigma_e2 <- sqrt(1 - c2^2 - c0^2 - 2*c0*c1*c2- c6^2 - 2*c0*c5*c6)
+
+sigma_e1
+sigma_e2
+```
+
+```{r}
+library(asbio)
+```
+
+```{r}
+set.seed(650)
+w <- rnorm(500)
+z <- rnorm(500)
+x <- w + z + rnorm(500)
+y <- x + w + z + rnorm(500)
+#anova(lm(y ~ x + w))
+y_o <- residuals(lm(y ~ w))
+x_o <- residuals(lm(x ~ w))
+z_o <- z - w
+
+partial.R2(lm(y ~ x + w),lm(y ~ x + w + z))
+partial.R2(lm(y ~ x),lm(y ~ x + z))
+partial.R2(lm(y ~ x + z),lm(y ~ x + w + z))
+```
+
+```{r}
+result_2sls <- c()
+result_ols <- c()
+result_noadj <- c()
+
+for (i in 1:500){
+  set.seed(i)
+  # data generating mechanism
+  
+  w <- rnorm(500)
+  z <- rnorm(500)
+  u <- rnorm(500)
+  e1 <- rnorm(500,0,sigma_e1)
+  e2 <- rnorm(500,0,sigma_e2)
+  
+  x <- c3*z + c1*u + c5*w + e1
+  y <- c0*x + c2*u + c6*w + e2
+  
+  data <- data.frame(cbind(x,y,z,u))
+  names(data) <- c("x","y","z","u")
+  
+  # 2sls
+  tsls_model <- ivreg(y ~ x + w| z + w, data = data)
+  # ols adjust
+  ols_model <- lm(y ~ x + z + w, data = data)
+  # no adjustment
+  no_adj <- lm(y ~ x + w, data = data)
+  
+  result_2sls <- c(result_2sls,coef(tsls_model)[2])
+  result_ols <- c(result_ols,coef(ols_model)[2])
+  result_noadj <- c(result_noadj,coef(no_adj)[2])
+}
+```
+
+```{r}
+w <- rnorm(500)
+z <- rnorm(500)
+u <- rnorm(500)
+e1 <- rnorm(500,0,sigma_e1)
+e2 <- rnorm(500,0,sigma_e2)
+
+x <- c3*z + c1*u + c5*w + e1
+y <- c0*x + c2*u + c6*w + e2
+
+data <- data.frame(cbind(x,y,z,u,w))
+names(data) <- c("x","y","z","u","w")
+
+# 2sls
+tsls_model <- ivreg(y ~ x + w| z + w, data = data)
+# ols adjust
+ols_model <- lm(y ~ x + z + w, data = data)
+# no adjustment
+no_adj <- lm(y ~ x + w, data = data)
+  
+```
+
+```{r}
+lm(y ~ x + u + z + w, data = data)
+lm(y ~ x + z + u, data = data)
+
+lm(x ~ z + w + u, data = data)
+lm(x ~ z + u, data = data)
+```
+
+```{r}
+model_adjust_z <- lm(y ~ x + w + z)
+
+ovb_bounds(model_adjust_z, treatment = "z", benchmark_covariates = c("w"))
+```
+```{r}
+(-0.09902981)^2
+```
+
+
+```{r}
+mean(result_2sls)
+c0
+```
+
+```{r}
+mean(result_ols)
+c0 + c1*c2/(1-c3^2-c6^2)
+```
+
+```{r}
+mean(result_noadj)
+c0+c1*c2
+```
+
+
+# Exclusion restriction violation
+
+```{r}
+c0 <- 0.3
+c1 <- 0.7
+c2 <- 0.7
+sqrt(1-c1^2)
+c3 <- 0.15
+
+sigma_e1 <- sqrt(1-c3^2-c1^2)
+
+quad(a = 1, b = 2*c0*c3, c = (c0^2 + c2^2 + 2*c0*c1*c2 -1))
+c4 <- 0.25
+
+sigma_e2 <- sqrt(1-(c0^2 + c2^2 + c4^2 + 2*c0*c2*c1 + 2*c0*c4*c3))
+```
+
+```{r}
+bias_er_2sls_calc <- function(c0,c1,c2,c3,c4){return(c4/c3)}
+bias_er_ols_calc  <- function(c0,c1,c2,c3,c4){return(c1*c2/(1-c3^2))}
+bias_er_noadj_calc <- function(c0,c1,c2,c3,c4){return(c1*c2 + c3*c4)}
+```
+
+```{r}
+simulate_er_violation <- function(c0,c1,c2,c3,c4,sigma_e1,sigma_e2){
+  result_2sls <- c()
+  result_ols <- c()
+  result_noadj <- c()
+  
+  c3_est <- c()
+  c4_est <- c()
+
+  for (i in 1:500){
+    set.seed(i)
+    # data generating mechanism
+    z <- rnorm(500)
+    u <- rnorm(500)
+    e1 <- rnorm(500,0,sigma_e1)
+    e2 <- rnorm(500,0,sigma_e2)
+    
+    x <- c3*z + c1*u + e1
+    y <- c4*z + c0*x + c2*u + e2
+    
+    data <- data.frame(cbind(x,y,z,u))
+    names(data) <- c("x","y","z","u")
+    
+    # 2sls
+    tsls_model <- ivreg(y ~ 0 + x | z, data = data)
+    # ols adjust
+    ols_model <- lm(y ~ 0 + x + z, data = data)
+    # no adjustment
+    no_adj <- lm(y ~ 0 + x, data = data)
+    
+    result_2sls <- c(result_2sls,coef(tsls_model)[1])
+    result_ols <- c(result_ols,coef(ols_model)[1])
+    result_noadj <- c(result_noadj,coef(no_adj)[1])
+  
+    c3_reg <- lm(z ~ 0 + x, data = data)
+    c3_est <- c(c3_est,coef(c3_reg)[1])
+    
+    c4_reg <- lm(y ~ 0 + z + x + u, data = data)
+    c4_est <- c(c4_est,coef(c4_reg)[1])
+  }
+  
+  print(mean(c3_est))
+  print(mean(c4_est))
+  
+  theo_2sls <- bias_er_2sls_calc(c0,c1,c2,c3,c4)
+  theo_ols <- bias_er_ols_calc(c0,c1,c2,c3,c4)
+  theo_noadj <- bias_er_noadj_calc(c0,c1,c2,c3,c4)
+  
+  return_data <- data.frame(cbind(c4,c3,mean(result_noadj) - c0,mean(result_ols) - c0,mean(result_2sls) - c0,theo_noadj,theo_ols,theo_2sls))
+  #names(return_data) <- c("ER_Violation","IV_Strength","result_2sls","result_ols","result_noadj","cf_2sls","cf_ols","cf_noadj")
+
+  return(return_data)
+}
+```
+
+```{r}
+c0 <- 0.3
+c1 <- 0.5
+c2 <- 0.5
+c3 = 0.5
+c4 = 0.25
+
+sigma_e1 <- sqrt(1-c3^2-c1^2)
+sigma_e2 <- sqrt(1-(c0^2 + c2^2 + c4^2 + 2*c0*c2*c1 + 2*c0*c4*c3))
+
+simulate_er_violation(c0,c1,c2,c3,c4,sigma_e1,sigma_e2)
+```
+
+
+## Graphical representation
+
+```{r}
+c0 <- 0.3
+c1 <- 0.7
+c2 <- 0.7
+c4_values <- seq(0,0.30,by = 0.025)
+c3_values <- seq(0.05,0.70,by = 0.025)
+
+graph_data_er <- data.frame(matrix(nrow = 0,ncol = 8))
+
+for (c4_val in c4_values){
+  for (c3_val in c3_values){
+    sigma_e1 <- sqrt(1-c3_val^2-c1^2)
+    sigma_e2 <- sqrt(1-(c0^2 + c2^2 + c4_val^2 + 2*c0*c2*c1 + 2*c0*c4_val*c3_val))
+    
+    graph_data_er <- rbind(graph_data_er,simulate_er_violation(c0,c1,c2,c3_val,c4_val,sigma_e1,sigma_e2))
+  }
+}
+names(graph_data_er) <- c("ER_Vio","IV_Strength","Unadjusted_Bias","OLS_Bias","TSLS_Bias","CF_Unadjusted_Bias","CF_OLS_Bias","CF_TSLS_Bias")
+```
+
+```{r}
+graph_data_er$unadj_diff <- abs(graph_data_er$Unadjusted_Bias - graph_data_er$CF_Unadjusted_Bias)
+graph_data_er$ols_diff <- abs(graph_data_er$OLS_Bias - graph_data_er$CF_OLS_Bias)
+graph_data_er$tsls_diff <- abs(graph_data_er$TSLS_Bias - graph_data_er$CF_TSLS_Bias)
+```
+
+```{r}
+plot_ly(showlegend = TRUE) %>%
+  add_trace(x = graph_data_er$ER_Vio, y = graph_data_er$IV_Strength, z = graph_data_er$tsls_diff, type = "mesh3d", color = "2SLS diff") %>%
+  add_trace(x = graph_data_er$ER_Vio, y = graph_data_er$IV_Strength, z = graph_data_er$ols_diff, type = "mesh3d", color = "OLS diff") %>%
+  add_trace(x = graph_data_er$ER_Vio, y = graph_data_er$IV_Strength, z = graph_data_er$unadj_diff, type = "mesh3d", color = "Unadjusted diff") %>%
+  layout(title = title,scene = list(xaxis = list(title = "ER Violation"),yaxis = list(title="Strength of IV"),zaxis = list(title="Inconsistency")))
+```
+
+```{r}
+graph_data_er
+```
+
+
+```{r}
+plot_ly(showlegend = TRUE) %>%
+  add_trace(x = graph_data_er$ER_Vio, y = graph_data_er$IV_Strength, z = graph_data_er$TSLS_Bias, type = "mesh3d", color = "2SLS") %>%
+  add_trace(x = graph_data_er$ER_Vio, y = graph_data_er$IV_Strength, z = graph_data_er$OLS_Bias, type = "mesh3d", color = "OLS") %>%
+  add_trace(x = graph_data_er$ER_Vio, y = graph_data_er$IV_Strength, z = graph_data_er$Unadjusted_Bias, type = "mesh3d", color = "Unadjusted") %>%
+  layout(title = title,scene = list(xaxis = list(title = "Strength of Violation"),yaxis = list(title="Strength of IV"),zaxis = list(title="Bias")))
+```
+
+```{r}
+c0 <- 0.3
+c1 <- 0.7
+c2 <- 0.7
+sqrt(1-c1^2)
+c3 <- 0.15
+
+quad(a = 1, b = 2*c0*c3, c = (c0^2 + c2^2 + 2*c0*c1*c2 -1))
+c4 <- 0.10
+```
+
+# IV is correlated with unobserved confounder
+
+```{r}
+c1 <- 0.5
+c2 <- 0.5
+c4 <- 0.25
+
+sigma_e3 <- sqrt(1-c4^2)
+quad(a = 1, b = 2*c1*c4, c = c1^2 - 1)
+c3 <- 0.5
+
+sigma_e1 <- sqrt(1-(c1^2 + c3^2 + 2*c1*c3*c4))
+
+quad(a = 1, b = 2*c1*c2, c = c2^2 -1)
+c0 <- 0.3
+
+sigma_e2 <- sqrt(1-(c0^2 + (2*c1*c2)))
+```
+
+
+```{r}
+simulate_iv_unobserved <- function(c0, c1, c2, c3, c4){
+  # NOTE: coverage of the theoretical result under misspecificiation, which should happen 95% of the time
+  
+  theo_2sls <- c2*c4/(c3 + c1*c4)
+  result_2sls <- c()
+  
+  theo_ols <- c1*c2*(1-c4^2)/(1-(c3+c1*c4)^2)
+  result_ols <- c()
+  
+  theo_noadj <- c1*c2 + c2*c3*c4
+  result_noadj <- c()
+  
+  for (i in 1:500){
+    set.seed(i)
+    # data generating mechanism
+    u <- rnorm(500)
+    
+    sigma_e3 <- rnorm(500,0,sqrt(1-c4^2))
+    z <- c4*u + sigma_e3
+    
+    sigma_e1 <- rnorm(500,0,sqrt(1-(c1^2 + c3^2 + 2*c1*c3*c4)))
+    x <- c3*z + c1*u + sigma_e1
+    
+    sigma_e2 <- rnorm(500,0,sqrt(1-(c0^2 + (2*c1*c2*c0) + c2^2)))
+    y <- c0*x + c2*u + sigma_e2
+    
+    data <- data.frame(cbind(x,y,z,u))
+    names(data) <- c("x","y","z","u")
+    
+    # 2sls
+    tsls_model <- ivreg(y ~ 0 + x | z, data = data)
+    # ols adjust
+    ols_model <- lm(y ~ 0 + x + z, data = data)
+    # no adjustment
+    no_adj <- lm(y ~ 0 + x, data = data)
+    
+    result_2sls <- c(result_2sls,coef(tsls_model)[1])
+    
+    result_ols <- c(result_ols,coef(ols_model)[1])
+    
+    result_noadj <- c(result_noadj,coef(no_adj)[1])
+  }
+  return_data <- data.frame(cbind(c4,c3,mean(result_noadj) - c0,mean(result_ols) - c0,mean(result_2sls) - c0,theo_noadj,theo_ols,theo_2sls))
+
+  return(return_data)
+}
+```
+
+```{r}
+c1 <- 0.50
+c2 <- 0.50
+c4 <- 0.25
+c0 <- 0.3
+c3 <- 0.5
+#c4_values <- seq(0,0.35,by = 0.025)
+#c3_values <- seq(0.05,0.55,by = 0.025)
+
+simulate_iv_unobserved(c0,c1,c2,c3,c4)
+```
+
+
+```{r}
+c1 <- 0.70
+c2 <- 0.70
+c4 <- 0.2
+c0 <- 0.3
+c4_values <- seq(0,0.35,by = 0.025)
+c3_values <- seq(0.05,0.55,by = 0.025)
+
+graph_data_uc <- data.frame(matrix(nrow = 0,ncol = 5))
+
+for (c4_val in c4_values){
+  for(c3_val in c3_values){
+    graph_data_uc <- rbind(graph_data_uc,simulate_iv_unobserved(c0,c1,c2,c3_val,c4_val))
+  }
+}
+names(graph_data_uc) <- c("UC_Vio","IV_Strength","Unadjusted_Bias","OLS_Bias","TSLS_Bias","CF_Unadjusted_Bias","CF_OLS_Bias","CF_TSLS_Bias")
+```
+```{r}
+graph_data_uc$unadj_diff <- abs(graph_data_uc$Unadjusted_Bias - graph_data_uc$CF_Unadjusted_Bias)
+graph_data_uc$ols_diff <- abs(graph_data_uc$OLS_Bias - graph_data_uc$CF_OLS_Bias)
+graph_data_uc$tsls_diff <- abs(graph_data_uc$TSLS_Bias - graph_data_uc$CF_TSLS_Bias)
+```
+
+```{r}
+plot_ly(showlegend = TRUE) %>%
+  add_trace(x = graph_data_uc$UC_Vio, y = graph_data_uc$IV_Strength, z = graph_data_uc$tsls_diff, type = "mesh3d", color = "2SLS diff") %>%
+  add_trace(x = graph_data_uc$UC_Vio, y = graph_data_uc$IV_Strength, z = graph_data_uc$ols_diff, type = "mesh3d", color = "OLS diff") %>%
+  add_trace(x = graph_data_uc$UC_Vio, y = graph_data_uc$IV_Strength, z = graph_data_uc$unadj_diff, type = "mesh3d", color = "Unadjusted diff") %>%
+  layout(title = title,scene = list(xaxis = list(title = "UC Violation"),yaxis = list(title="Strength of IV"),zaxis = list(title="Bias")))
+```
+
+## Strong IV
+
+Accuracy of results differ by IV strength
+
+```{r}
+c1 <- 0.5
+c2 <- 0.5
+c4 <- 0.25
+
+quad(a = 1, b = 2*c1*c4, c = c1^2 - 1)
+c3 <- 0.65
+
+quad(a = 1, b = 2*c1*c2, c = c2^2 -1)
+c0 <- 0.3
+```
+
+```{r}
+strong_IV_sim <- simulate_iv_unobserved(c0,c1,c2,c3,c4)
+```
+
+```{r}
+# 2SLS
+mean(strong_IV_sim$result_2sls)
+#sum(strong_IV_sim$cover_2sls)/length(strong_IV_sim$cover_2sls)
+```
+
+```{r}
+# OLS adjustment for Z
+mean(strong_IV_sim$result_ols)
+#sum(strong_IV_sim$cover_ols)/length(strong_IV_sim$cover_ols)
+```
+
+```{r}
+# no OLS adjustment for Z
+mean(strong_IV_sim$result_noadj)
+#sum(strong_IV_sim$cover_noadj)/length(strong_IV_sim$cover_noadj)
+```
+
+## Med_IV
+
+```{r}
+c3_med <- 0.35
+med_IV_sim <- simulate_iv_unobserved(c0,c1,c2,c3_med,c4)
+```
+
+```{r}
+# 2SLS
+mean(med_IV_sim$result_2sls)
+```
+
+```{r}
+# OLS adjustment for Z
+mean(med_IV_sim$result_ols)
+sum(med_IV_sim$cover_ols)/length(med_IV_sim$cover_ols)
+```
+
+```{r}
+# no OLS adjustment for Z
+mean(med_IV_sim$result_noadj)
+```
+
+## Weak IV
+
+```{r}
+c3_weak <- 0.05
+weak_IV_sim <- simulate_iv_unobserved(c0,c1,c2,c3_weak,c4)
+```
+
+```{r}
+# 2SLS
+mean(weak_IV_sim$result_2sls)
+sum(weak_IV_sim$cover_2sls)/length(weak_IV_sim$cover_2sls)
+```
+
+```{r}
+# OLS adjustment for Z
+mean(weak_IV_sim$result_ols)
+sum(weak_IV_sim$cover_ols)/length(weak_IV_sim$cover_ols)
+```
+
+```{r}
+# no OLS adjustment for Z
+mean(weak_IV_sim$result_noadj)
+sum(weak_IV_sim$cover_noadj)/length(weak_IV_sim$cover_noadj)
+```
+
+```{r}
+c1 <- 0.70
+c2 <- 0.70
+c4 <- 0.2
+
+quad(a = 1, b = 2*c1*c4, c = c1^2 - 1)
+c3 <- 0.65
+
+quad(a = 1, b = 2*c1*c2, c = c2^2 -1)
+c0 <- 0.3
+```
+
+## Graphical representation
+
+```{r}
+bias_2sls_calc <- function(c0,c1,c2,c3,c4){return(c2*c4/(c3 + c1*c4))}
+bias_ols_calc  <- function(c0,c1,c2,c3,c4){return(c1*c2*(1-c4^2)/(1-(c3+c1*c4)^2))}
+bias_noadj_calc <- function(c0,c1,c2,c3,c4){return(c1*c2 + c2*c3*c4)}
+```
+
+```{r}
+c4_values <- seq(0,0.35,by = 0.025)
+c3_values <- seq(0.05,0.55,by = 0.025)
+
+graph_data_uc <- data.frame(matrix(nrow = 0,ncol = 5))
+
+for (c4_val in c4_values){
+  er_bias_2sls <- bias_er_2sls_calc(c0,c1,c2,seq(0.05,0.75,by = 0.05),c4_val)
+  er_bias_ols <- bias_er_ols_calc(c0,c1,c2,seq(0.05,0.75,by = 0.05),c4_val)
+  er_bias_unadj <- bias_er_noadj_calc(c0,c1,c2,seq(0.05,0.75,by = 0.05),c4_val)
+  
+  graph_data_uc <- rbind(graph_data_uc,data.frame(cbind(rep(c4_val,length(c3_values)),seq(0.05,0.75,by = 0.05),er_bias_2sls,er_bias_ols,er_bias_unadj)))
+}
+names(graph_data_er) <- c("ER_Vio","IV_Strength","TSLS_Bias","OLS_Bias","Unadjusted_Bias","CF_TSLS_Bias","CF_OLS_Bias","CF_Unadjusted_Bias")
+```
+
+```{r}
+graph_data_er
+```
+
+
+```{r}
+plot_ly(showlegend = TRUE) %>%
+  add_trace(x = graph_data_er$ER_Vio, y = graph_data_er$IV_Strength, z = graph_data_er$TSLS_Bias, type = "mesh3d", color = "2SLS") %>%
+  add_trace(x = graph_data_er$ER_Vio, y = graph_data_er$IV_Strength, z = graph_data_er$OLS_Bias, type = "mesh3d", color = "OLS") %>%
+  add_trace(x = graph_data_er$ER_Vio, y = graph_data_er$IV_Strength, z = graph_data_er$Unadjusted_Bias, type = "mesh3d", color = "Unadjusted") %>%
+  layout(title = title,scene = list(xaxis = list(title = "Strength of Violation"),yaxis = list(title="Strength of IV"),zaxis = list(title="Bias")))
+```
+
+```{r}
+# graphical demonstration
+bias_2sls_calc <- function(c0,c1,c2,c3,c4){return(c2*c4/(c3 + c1*c4))}
+bias_ols_calc  <- function(c0,c1,c2,c3,c4){return(c1*c2*(1-c4^2)/(1-(c3+c1*c4)^2))}
+bias_noadj_calc <- function(c0,c1,c2,c3,c4){return(c1*c2 + c2*c3*c4)}
+
+z_bias_2sls <- bias_2sls_calc(c0,c1,c2,seq(0.05,0.75,by = 0.05),c4)
+z_bias_ols <- bias_ols_calc(c0,c1,c2,seq(0.05,0.75,by = 0.05),c4)
+z_bias_unadj <- bias_noadj_calc(c0,c1,c2,seq(0.05,0.75,by = 0.05),c4)
+```
+
+```{r}
+graph_data <- data.frame(cbind(seq(0.05,0.75,by = 0.05),z_bias_2sls,z_bias_ols,z_bias_unadj))
+names(graph_data) <- c("IV_Strength","TSLS_Bias","OLS_Bias","Unadjusted_Bias")
+```
+
+```{r}
+ggplot(graph_data,aes(IV_Strength)) + 
+  geom_line(aes(y = TSLS_Bias, colour = "TSLS_Bias")) +
+  geom_line(aes(y = OLS_Bias, colour = "OLS_Bias")) +
+  geom_line(aes(y = Unadjusted_Bias, colour = "Unadjusted_Bias"))
+```
+
+# Collider Bias (not really relevant but keeping)
+
+```{r}
+# basic collider bias example
+result_collider <- c()
+result_reg <- c()
+result_y_s <- c()
+result_x_s <- c()
+
+b1 <- 0.25
+b2 <- 0.25
+c0 <- 0.5
+
+for (i in 1:1000){
+  set.seed(i+100)
+  x <- rnorm(250)
+  x_0 <- (x - mean(x))/sd(x)
+  y <- rnorm(250,c0*x_0,1)
+  y_0 <- (y - mean(y))/sd(y)
+  s <- rnorm(250,b1*x_0 + b2*y_0,1)
+  s_0 <- (s - mean(s))/sd(s)
+  
+  result_reg <- c(result_reg, coef(lm(y_0 ~ x_0 + 0))[1])
+  result_collider <- c(result_collider, coef(lm(y_0 ~ x_0 + s_0 + 0))[1])
+  result_y_s <- c(result_y_s, coef(lm(y_0 ~ s_0 + 0))[1])
+  result_x_s <- c(result_x_s, coef(lm(x_0 ~ s_0 + 0))[1])
+}
+```
+
+```{r}
+mean(result_reg)
+mean(result_collider)
+mean(result_y_s)
+mean(result_x_s)
+```
+
+```{r}
+(c0*(1-b1^2+c0*b1*b2 + b2^2) + b1*b2)/(1-(b1+c0*b2)^2)
+```
+
+```{r}
+(c0 - (c0*b1 + b2)*(b1+c0*b2))/(1-(b1+c0*b2)^2)
+```
+
+```{r}
+# collider bias with IV
+unadj_reg <- c()
+z_reg <- c()
+tsls_reg <- c()
+
+b1 <- 0.25
+b2 <- 0.25
+c0 <- 0.5
+c1 <- 0.3
+c2 <- 0.3
+c3 <- 0.5
+
+for (i in 1:1000){
+  set.seed(i)
+  z <- rnorm(250)
+  u <- rnorm(250)
+  
+  x <- rnorm(250,c1*u + c3*z,1)
+  y <- rnorm(250,c0*x + c2*u)
+  s <- rnorm(250,b1*z + b2*y)
+  
+  unadj_reg <- c(unadj_reg, coef(lm(y ~ x + 0))[1])
+  z_reg <- c(z_reg,coef(lm(y ~ x + z + 0))[1])
+  tsls_reg <- c(tsls_reg,coef(ivreg(y ~ x + 0 | z))[1])
+}
+```
+
+```{r}
+mean(unadj_reg)
+```
+
+```{r}
+mean(z_reg)
+```
+
+Adjusting for Z introduces bias, perhaps via this collider bias
+
+```{r}
+mean(tsls_reg)
+```
+
+# Selection Bias (not really relevant but keeping)
+
+```{r}
+iv_sel_bias_result <- function(c0,c1,c2,c3,b1,b2){
+  unadj_reg <- c()
+  z_reg <- c()
+  tsls_reg <- c()
+  
+  for (i in 1:1000){
+    set.seed(i)
+    z <- rnorm(250)
+    u <- rnorm(250)
+    
+    x <- rnorm(250,c1*u + c3*z,1)
+    y <- rnorm(250,c0*x + c2*u)
+    f <- rnorm(250,b1*z + b2*y)
+    s <- ifelse(f > median(f),1,0)
+    
+    data_selection <- data.frame(cbind(z,u,x,y,f,s))
+    names(data_selection) <- c("z","u","x","y","f","s")
+    
+    
+    unadj_reg <- c(unadj_reg, coef(lm(y ~ x + 0, data = data_selection[data_selection$s == 1,]))[1])
+    z_reg <- c(z_reg,coef(lm(y ~ x + z + 0, data = data_selection[data_selection$s == 1,]))[1])
+    tsls_reg <- c(tsls_reg,coef(ivreg(y ~ x + 0 | z, data = data_selection[data_selection$s == 1,]))[1])
+  }
+  return_data <- data.frame(cbind(unadj_reg,z_reg,tsls_reg))
+  names(return_data) <- c("unadj","zreg","tsls")
+  return(return_data)
+}
+```
+
+```{r}
+s1_sel_bias <- iv_sel_bias_result(c0 = 0.5,c1 = 0.3, c2 = 0.5, c3 = 0.5, b1 = 0.5, b2 = 0.5)
+mean(s1_sel_bias$unadj)
+mean(s1_sel_bias$zreg)
+mean(s1_sel_bias$tsls)
+```
+
+```{r}
+no_sel_bias_1 <- iv_sel_bias_result(c0 = 0.5,c1 = 0.3, c2 = 0.5, c3 = 0.5, b1 = 0, b2 = 0)
+mean(no_sel_bias_1$unadj)
+mean(no_sel_bias_1$zreg)
+mean(no_sel_bias_1$tsls)
+```
+
+```{r}
+no_sel_bias_2 <- iv_sel_bias_result(c0 = 0.5,c1 = 0.3, c2 = 0.5, c3 = 0.5, b1 = 0.5, b2 = 0)
+mean(no_sel_bias_2$unadj)
+mean(no_sel_bias_2$zreg)
+mean(no_sel_bias_2$tsls)
+```
+
+```{r}
+no_sel_bias_3 <- iv_sel_bias_result(c0 = 0.5,c1 = 0.3, c2 = 0.5, c3 = 0.5, b1 = 0, b2 = 0.5)
+mean(no_sel_bias_3$unadj)
+mean(no_sel_bias_3$zreg)
+mean(no_sel_bias_3$tsls)
+```
+
+Note that conditioning on compliers does not effect point estimates for the confounder methods due to blocking of backdoor and no conditioning on collider, which makes this a decent model to pursue.
+
+
+# Treatment Effect Heterogeneity
+
+```{r}
+em_bias_noadj_calc <- function(a1,a2,a3,b1,b2,b3){return(b2*a2 + 2*b3*a1*a3)}
+em_bias_ols_calc  <- function(a1,a2,a3,b1,b2,b3){return((a2*b2 + a1*a3*b3)/(1-a1^2))}
+em_bias_2sls_calc <- function(a1,a2,a3,b1,b2,b3){return(a3*b3 / a1)}
+
+binary_em_bias_noadj_calc <- function(a1,a2,a3,b1,b2,b3,p){return(b2*a2 + b3*(a1*(p*(a1+a3)-(1-p)*(a1 - a3)) + a1*a3))}
+binary_em_bias_2sls_calc <- function(a1,a2,a3,b1,b2,b3,p){return(b3*((p*(a1+a3)-(1-p)*(a1 - a3))/a1))}
+```
+
+```{r}
+z_d_interaction_bias <- function(a1,a2,a3,b1,b2,b3,s_e1,s_e2,p=0.5,n_generate = 500, binary_u = FALSE){
+  unadj_result <- c()
+  adj_result <- c()
+  h_tsls_result <- c()
+  
+  result_a <- c()
+  result_b <- c()
+  result_c <- c()
+  other_result <- c()
+  
+  for (i in 1:500){
+    set.seed(i)
+    if (binary_u){
+      u1_star <- rbinom(n_generate,1,p)
+      u1 <- (u1_star - p)/sqrt(p*(1-p))
+    } else{
+      u1 <- rnorm(n_generate)
+    }
+    z <- rnorm(n_generate)
+    e1 <- rnorm(n_generate,0,sqrt(s_e1))
+    e2 <- rnorm(n_generate,0,sqrt(s_e2))
+  
+    x <- a1*z + a2*u1 + a3*z*u1 + e1
+    y <- b1*x + b2*u1 + b3*x*u1 + e2
+    
+    unadj_result <- c(unadj_result, coef(lm(y ~ 0 + x))[1])
+    adj_result <- c(adj_result,coef(lm(y ~ 0 + x + z))[1])
+    h_tsls_result <- c(h_tsls_result,coef(ivreg(y ~ 0 + x | z))[1])
+  
+    result_a <- c(result_a,mean(u1*x*z))
+    result_b <- c(result_b,cov(u1,x))
+    result_c <- c(result_c,mean(z*u1^2*x))
+    other_result <- c(other_result,cov(x*u1,x))
+  }
+  
+  if (binary_u){
+    cf_unadj <- binary_em_bias_noadj_calc(a1,a2,a3,b1,b2,b3,p)
+    cf_tsls <- binary_em_bias_2sls_calc(a1,a2,a3,b1,b2,b3,p)
+  }else{
+    cf_unadj <- em_bias_noadj_calc(a1,a2,a3,b1,b2,b3)
+    cf_tsls <- em_bias_2sls_calc(a1,a2,a3,b1,b2,b3)
+  }
+  
+  cf_zreg <- em_bias_ols_calc(a1,a2,a3,b1,b2,b3)
+
+  #print(mean(result_a))
+  #print(mean(result_b))
+  #print(mean(result_c))
+  #print(mean(other_result))
+
+  return_data <- data.frame(cbind(a3,a1,mean(unadj_result) - b1, mean(adj_result) - b1, mean(h_tsls_result) - b1,cf_unadj,cf_zreg,cf_tsls))
+  names(return_data) <- c("ZU_Interaction","IV_Strength","unadj","zreg","tsls","cf_unadj","cf_zreg","cf_tsls")
+  return(return_data)
+}
+```
+
+```{r}
+a1 = 0.45
+a2 = 0.15
+a3 = 0.1
+b1 = 0.1
+b2 = 0.20
+b3 = 0.1
+
+sigma_e1_int = 1 - (a1^2 + a2^2 + a3^2)
+sigma_e2_int = 1 - (b1^2 + b2^2 + b3^2 + 2*b1*b2*a2 + 2*b1*b2*b3*(a1*a3 + a1*a3))
+z_d_interaction_bias(a1,a2,a3,b1,b2,b3,sigma_e1_int,sigma_e2_int, n_generate = 3000, binary_u = FALSE)
+```
+
+```{r}
+sample_sizes <- seq(500,5000,100)
+
+# No adjustment
+
+cf_result_continuous <- em_bias_noadj_calc(a1,a2,a3,b1,b2,b3)
+result_continuous <- c()
+perc_error_continuous <- c()
+
+cf_result_binary <- binary_em_bias_noadj_calc(a1,a2,a3,b1,b2,b3,p=0.5)
+result_binary <- c()
+perc_error_binary <- c()
+
+# 2SLS
+
+cf_result_continuous_iv <- em_bias_2sls_calc(a1,a2,a3,b1,b2,b3)
+result_continuous_iv <- c()
+perc_error_continuous_iv <- c()
+
+cf_result_binary_iv <- binary_em_bias_2sls_calc(a1,a2,a3,b1,b2,b3,p=0.5)
+result_binary_iv <- c()
+perc_error_binary_iv <- c()
+
+for (size in sample_sizes){
+  
+  result_run_cont <- z_d_interaction_bias(a1,a2,a3,b1,b2,b3,sigma_e1_int,sigma_e2_int, n_generate = size)
+  result_run_binary <- z_d_interaction_bias(a1,a2,a3,b1,b2,b3,sigma_e1_int,sigma_e2_int, binary_u = TRUE, n_generate = size)
+  
+  # unadjusted
+
+  ## continuous
+  result_continuous <- c(result_continuous,result_run_cont[,"unadj"])
+  perc_error_continuous <- c(perc_error_continuous,(result_run_cont[,"unadj"]-cf_result_continuous)/result_run_cont[,"unadj"])  
+  
+  ## binary
+  result_binary <- c(result_binary,result_run_binary[,"unadj"])
+  perc_error_binary <- c(perc_error_binary,(result_run_binary[,"unadj"]-cf_result_binary)/result_run_binary[,"unadj"])
+  
+  # IV
+  
+  ## continuous
+  result_continuous_iv <- c(result_continuous_iv,result_run_cont[,"tsls"])
+  perc_error_continuous_iv <- c(perc_error_continuous_iv,(result_run_cont[,"tsls"]-cf_result_continuous_iv)/result_run_cont[,"tsls"])  
+
+  ## binary
+  result_binary_iv <- c(result_binary_iv,result_run_binary[,"tsls"])
+  perc_error_binary_iv <- c(perc_error_binary_iv,(result_run_binary[,"tsls"]-cf_result_binary_iv)/result_run_binary[,"unadj"])  
+}
+```
+
+
+### Unadjusted 
+
+```{r}
+plot(sample_sizes,result_binary)
+lines(sample_sizes,result_binary)
+abline(h = cf_result_binary, col = "red")
+```
+```{r}
+plot(sample_sizes,perc_error_binary)
+lines(sample_sizes,perc_error_binary)
+abline(h = 0, col = "red")
+```
+
+```{r}
+plot(sample_sizes,result_continuous)
+lines(sample_sizes,result_continuous)
+abline(h = cf_result_continuous, col = "red")
+```
+
+```{r}
+plot(sample_sizes,perc_error_continuous)
+lines(sample_sizes,perc_error_continuous)
+abline(h = 0, col = "red")
+```
+### IV Analysis
+
+```{r}
+plot(sample_sizes,result_binary_iv)
+lines(sample_sizes,result_binary_iv)
+abline(h = cf_result_binary_iv, col = "red")
+```
+
+```{r}
+plot(sample_sizes,perc_error_binary_iv)
+lines(sample_sizes,perc_error_binary_iv)
+abline(h = 0, col = "red")
+```
+
+```{r}
+plot(sample_sizes,result_continuous_iv)
+lines(sample_sizes,result_continuous_iv)
+abline(h = cf_result_continuous_iv, col = "red")
+```
+
+```{r}
+plot(sample_sizes,perc_error_continuous_iv)
+lines(sample_sizes,perc_error_continuous_iv)
+abline(h = 0, col = "red")
+```
+
+## Treatment Effect Heterogeneity Binary
+
+```{r}
+binary_em_bias_noadj_calc <- function(a1,a2,a3,b1,b2,b3){return(b2*a2 + b3*(0.5*((a1+a3)^2+a2^2) + 0.5*((a1-a3)^2 + a2^2)))}
+```
+
+```{r}
+z_d_interaction_bias_binary_u <- function(a1,a2,a3,b1,b2,b3,s_e1,s_e2, p = 0.5){
+  unadj_result <- c()
+  adj_result <- c()
+  h_tsls_result <- c()
+  
+  other_result <- c()
+  
+  for (i in 1:500){
+    set.seed(i)
+    
+    u1 <- rbinom(500,1,p)
+    z <- rnorm(500)
+    e1 <- rnorm(500,0,sqrt(s_e1))
+    e2 <- rnorm(500,0,sqrt(s_e2))
+  
+    x <- a1*z + a2*u1 + a3*z*u1 + e1
+    y <- b1*x + b2*u1 + b3*x*u1 + e2
+    
+    unadj_result <- c(unadj_result, coef(lm(y ~ 0 + x))[1])
+    adj_result <- c(adj_result,coef(lm(y ~ 0 + x + z))[1])
+    h_tsls_result <- c(h_tsls_result,coef(ivreg(y ~ 0 + x | z))[1])
+    
+    other_result <- c(other_result,cov(u1,x))
+  }
+  
+  if (binary_u){
+    cf_unadj <- binary_em_bias_noadj_calc(a1,a2,a3,b1,b2,b3)
+  }else{
+    cf_unadj <- em_bias_noadj_calc(a1,a2,a3,b1,b2,b3)
+  }
+  
+
+  cf_zreg <- em_bias_ols_calc(a1,a2,a3,b1,b2,b3)
+  cf_tsls <- em_bias_2sls_calc(a1,a2,a3,b1,b2,b3)
+  
+  print(mean(other_result))
+
+  return_data <- data.frame(cbind(a3,a1,mean(unadj_result) - b1, mean(adj_result) - b1, mean(h_tsls_result) - b1,cf_unadj,cf_zreg,cf_tsls))
+  names(return_data) <- c("ZU_Interaction","IV_Strength","unadj","zreg","tsls","cf_unadj","cf_zreg","cf_tsls")
+  return(return_data)
+}
+```
+
+
+
+```{r}
+test <- rbinom(500,1,0.5)
+
+test_std <- (test - mean(test))/sd(test)
+
+mean(test_std)
+var(test_std)
+```
+
+```{r}
+a2 = 0.15
+b1 = 0.1
+b2 = 0.20
+b3 = 0.1
+
+a3_values <- seq(0,0.2,by = 0.025)
+a1_values <- seq(0.05,0.5,by = 0.025)
+
+graph_data_em <- data.frame(matrix(nrow = 0,ncol = 8))
+
+for (a3_val in a3_values){
+  for(a1_val in a1_values){
+    sigma_e1_int = 1 - (a1_val^2 + a2^2 + a3_val^2)
+    sigma_e2_int = 1 - (b1^2 + b2^2 + b3^2 + 2*b1*b2*a2 + 2*b1*b2*b3*(a1_val*a3_val + a1_val*a3_val))
+    graph_data_em <- rbind(graph_data_em,z_d_interaction_bias(a1_val,a2,a3_val,b1,b2,b3,sigma_e1_int,sigma_e2_int))
+  }
+}
+names(graph_data_em) <- c("ZU_Interaction","IV_Strength","Unadjusted_Bias","OLS_Bias","TSLS_Bias","CF_Unadjusted_Bias","CF_OLS_Bias","CF_TSLS_Bias")
+```
+
+```{r}
+graph_data_em$unadj_diff <- abs(graph_data_em$Unadjusted_Bias - graph_data_em$CF_Unadjusted_Bias)
+graph_data_em$ols_diff <- abs(graph_data_em$OLS_Bias - graph_data_em$CF_OLS_Bias)
+graph_data_em$tsls_diff <- abs(graph_data_em$TSLS_Bias - graph_data_em$CF_TSLS_Bias)
+```
+
+```{r}
+plot_ly(showlegend = TRUE) %>%
+  add_trace(x = graph_data_em$ZU_Interaction, y = graph_data_em$IV_Strength, z = graph_data_em$tsls_diff, type = "mesh3d", color = "2SLS diff") %>%
+  add_trace(x = graph_data_em$ZU_Interaction, y = graph_data_em$IV_Strength, z = graph_data_em$ols_diff, type = "mesh3d", color = "OLS diff") %>%
+  add_trace(x = graph_data_em$ZU_Interaction, y = graph_data_em$IV_Strength, z = graph_data_em$unadj_diff, type = "mesh3d", color = "Unadjusted diff") %>%
+  layout(title = title,scene = list(xaxis = list(title = "Strength of Z*U Interaction Simulation vs. Theoretical"),yaxis = list(title="Strength of IV"),zaxis = list(title="Bias")))
+```
+
+Looks good, we have weak IV finite bias, which is not really able to be directly calculated, other than that we are good
+
+```{r}
+a1 = 0.05
+a2 = 0.15
+a3 = 0.5
+
+sigma_e1_int = 1 - (a1^2 + a2^2 + a3^2)
+sigma_e1_int
+
+b1 = 0.1
+b2 = 0.20
+b3 = 0.6
+
+sigma_e2_int = 1 - (b1^2 + b2^2 + b3^2 + 2*a2 + 2*(a1*a2 + a1*a3))
+sigma_e2_int
+```
+
+```{r}
+inter_bias <- z_d_interaction_bias(a1,a2,a3,b1,b2,b3,sigma_e1_int,sigma_e2_int)
+```
+
+```{r}
+a3/(a2^2 + 3*a3^2)
+```
+
+
+```{r}
+mean(inter_bias$unadj) - b1
+b2*a2 + b3*(2*a1*a3)
+```
+
+```{r}
+mean(inter_bias$zreg) - b1
+# my derivation
+(a2*b2 + a1*a3*b3)/(1-a1^2)
+```
+
+```{r}
+mean(inter_bias$tsls) - b1
+(a3)*b3 / a1
+```
+
+
+## Graphical representation
+
+```{r}
+a1 = 0.05
+a2 = 0.15
+a3 = 0.15
+
+sigma_e1_int = 1 - (a1^2 + a2^2 + a3^2)
+sigma_e1_int
+```
+
+```{r}
+#a1 = 0.05 to 0.7
+#a3 = 0 to 0.3
+```
+
+
+```{r}
+#setting values for everything besides a1 and a3
+a1 = 0.5
+a2 = 0.25
+a3 = 0.20
+
+sigma_e1_int = 1 - (a1^2 + a2^2 + a3^2)
+sigma_e1_int
+
+b1 = 0.05
+b2 = 0.20
+b3 = 0.05
+
+sigma_e2_int = 1 - (b1^2 + b2^2 + b3^2 + 2*a2 + 2*(a1*a2 + a1*a3))
+sigma_e2_int
+```
+
+
+```{r}
+em_bias_noadj_calc <- function(a1,a2,a3,b1,b2,b3){return(b2*a2 + 2*b3*a1*a3)}
+em_bias_ols_calc  <- function(a1,a2,a3,b1,b2,b3){return((a2*b2 + a1*a3*b3)/(1-a1^2))}
+em_bias_2sls_calc <- function(a1,a2,a3,b1,b2,b3){return(a3*b3 / a1)}
+```
+
+```{r}
+a2 = 0.15
+b1 = 0.1
+b2 = 0.20
+b3 = 0.1
+a3_values <- seq(0,0.2,by = 0.025)
+a1_values <- seq(0.05,0.5,by = 0.025)
+
+graph_data_em <- data.frame(matrix(nrow = 0,ncol = 5))
+
+for (a3_val in a3_values){
+  em_bias_2sls <- em_bias_2sls_calc(a1_values,a2,a3_val,b1,b2,b3)
+  em_bias_ols <- em_bias_ols_calc(a1_values,a2,a3_val,b1,b2,b3)
+  em_bias_unadj <- em_bias_noadj_calc(a1_values,a2,a3_val,b1,b2,b3)
+  
+  graph_data_em <- rbind(graph_data_em,data.frame(cbind(rep(a3_val,length(a1_values)),a1_values,em_bias_2sls,em_bias_ols,em_bias_unadj)))
+}
+names(graph_data_em) <- c("ZU_Interaction","IV_Strength","TSLS_Bias","OLS_Bias","Unadjusted_Bias")
+```
+
+```{r}
+plot_ly(showlegend = TRUE) %>%
+  add_trace(x = graph_data_em$ZU_Interaction, y = graph_data_em$IV_Strength, z = graph_data_em$TSLS_Bias, type = "mesh3d", color = "2SLS") %>%
+  add_trace(x = graph_data_em$ZU_Interaction, y = graph_data_em$IV_Strength, z = graph_data_em$OLS_Bias, type = "mesh3d", color = "OLS") %>%
+  add_trace(x = graph_data_em$ZU_Interaction, y = graph_data_em$IV_Strength, z = graph_data_em$Unadjusted_Bias, type = "mesh3d", color = "Unadjusted") %>%
+  layout(title = title,scene = list(xaxis = list(title = "Z*U Interaction"),yaxis = list(title="Strength of IV"),zaxis = list(title="Bias")))
+```
+
+```{r}
+theta_function <- function(theta_1,theta_2){sqrt(theta_1)/sqrt(1-theta_2)}
+
+test_data <- data.frame(matrix(nrow = 0,ncol = 3))
+names(test_data) <- c("x","y","z")
+for (th_1 in seq(0.01,0.99,by=0.01)){
+  for (th_2 in seq(0.01,0.99,by=0.01)){
+    # We induce a caliper for it being within 0.005
+    test_data <- test_data %>% add_row("x" = th_1, "y" = th_2, "z" = theta_function(th_1,th_2)) 
+    }
+  }
+```
+
+
+```{r}
+plot_ly(showlegend = TRUE) %>%
+  add_trace(x = test_data$x, y = test_data$y, z = test_data$z)
+```
+
+
+
